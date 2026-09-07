@@ -1,0 +1,14 @@
+{
+  "name": "@axon/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Smart contracts for Axon protocol operations registry",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test -vv",
+    "test:fuzz": "forge test -vvv --fuzz-runs 1000",
+    "deploy:sepolia": "forge script script/Deploy.s.sol --rpc-url $BASE_SEPOLIA_RPC_URL --broadcast --verify --chain-id 84532",
+    "deploy:base": "forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast --verify --chain-id 8453",
+    "clean": "forge clean"
+  }
+}

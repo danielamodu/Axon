@@ -1,0 +1,18 @@
+{
+  "name": "axon",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:watcher": "npm --workspace=packages/watcher run dev",
+    "start:watcher": "npm --workspace=packages/watcher run start",
+    "test:watcher": "npm --workspace=packages/watcher run test",
+    "test": "npm run test:watcher -- --run",
+    "db:push": "npm --workspace=packages/watcher run db:push",
+    "db:generate": "npm --workspace=packages/watcher run db:generate",
+    "db:studio": "npm --workspace=packages/watcher run db:studio"
+  }
+}

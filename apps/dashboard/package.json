@@ -1,0 +1,6 @@
+{
+  "name": "@axon/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Next.js frontend dashboard for Axon operations (scaffold only, Phase 6)"
+}

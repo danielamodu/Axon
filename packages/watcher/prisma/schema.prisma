@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SpellRecord {
+  id                String          @id @default(cuid())
+  spellAddress      String          @unique
+  calledAt          DateTime        // when hat() changed to this spell
+  earliestExecution DateTime        // calledAt + GSM delay
+  latestExecution   DateTime        // calledAt + 30 days
+  officeHoursActive Boolean
+  nextExecutionWindow DateTime      // first valid office-hours slot
+  calldata          String          // raw calldata hex
+  actions           Json            // parsed action list
+  status            SpellStatus     @default(QUEUED)
+  simulationScore   SimulationScore?
+  conflictStatus    ConflictStatus?
+  conflictDetail    String?
+  executedAt        DateTime?
+  txHash            String?
+  gasUsed           BigInt?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+}
+
+enum SpellStatus {
+  QUEUED
+  SIMULATING
+  CONFLICT
+  READY
+  EXECUTING
+  EXECUTED
+  FAILED
+  EXPIRED
+  HELD
+}
+
+enum SimulationScore {
+  GREEN
+  YELLOW
+  RED
+}
+
+enum ConflictStatus {
+  CLEAR
+  CONFLICT
+}
