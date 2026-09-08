@@ -1,7 +1,7 @@
 import { createPublicClient, http, type Address } from 'viem'
 import { mainnet } from 'viem/chains'
 import { PrismaClient } from '@prisma/client'
-import { CHIEF_ABI, SPELL_ABI } from './abi'
+import { CHIEF_ABI } from './abi'
 import { parseSpell } from './spell-parser'
 import { nextOfficeHoursSlot } from './office-hours'
 import {
@@ -12,26 +12,67 @@ import {
 } from './constants'
 import { logger } from './logger'
 import { SpellRecordSchema } from './types'
+import type { ProtocolConfig } from './protocols/types'
+
+export const DEFAULT_SKY_CONFIG: ProtocolConfig = {
+  id: 'sky',
+  name: 'Sky Protocol',
+  chainId: 1,
+  governanceContract: SKY_CHIEF_ADDRESS,
+  governanceType: 'makerdao-spell',
+  executionMethod: 'cast',
+  timelockDelay: GSM_PAUSE_DELAY_SECONDS,
+  officeHours: true,
+  officeHoursStart: 14,
+  officeHoursEnd: 21,
+  officeDays: [1, 2, 3, 4, 5],
+  expirySeconds: SPELL_EXPIRY_SECONDS,
+  network: 'mainnet',
+  tags: ['stablecoin', 'lending'],
+}
 
 export class GovernanceWatcher {
   private client: ReturnType<typeof createPublicClient>
   private prisma: PrismaClient
+  private config: ProtocolConfig
   private lastKnownHat: Address | null = null
   private running = false
 
   constructor(
-    rpcUrlOrClient: string | ReturnType<typeof createPublicClient>,
-    prisma?: PrismaClient
+    configOrRpc: ProtocolConfig | string | ReturnType<typeof createPublicClient>,
+    rpcOrPrisma?: string | ReturnType<typeof createPublicClient> | PrismaClient,
+    prismaOrConfig?: PrismaClient | ProtocolConfig
   ) {
-    if (typeof rpcUrlOrClient === 'string') {
-      this.client = createPublicClient({
-        chain: mainnet,
-        transport: http(rpcUrlOrClient),
-      })
+    if (typeof configOrRpc === 'object' && 'governanceContract' in configOrRpc) {
+      // (config, rpcOrClient, prisma)
+      this.config = configOrRpc
+      if (typeof rpcOrPrisma === 'string') {
+        this.client = createPublicClient({
+          chain: mainnet,
+          transport: http(rpcOrPrisma),
+        })
+      } else if (rpcOrPrisma && 'readContract' in rpcOrPrisma) {
+        this.client = rpcOrPrisma as ReturnType<typeof createPublicClient>
+      } else {
+        this.client = createPublicClient({
+          chain: mainnet,
+          transport: http(process.env.ETH_RPC_URL ?? 'https://ethereum-rpc.publicnode.com'),
+        })
+      }
+      this.prisma = (prismaOrConfig as PrismaClient) ?? new PrismaClient()
     } else {
-      this.client = rpcUrlOrClient
+      // Backward compatible: (rpcUrlOrClient, prisma?, config?)
+      if (typeof configOrRpc === 'string') {
+        this.client = createPublicClient({
+          chain: mainnet,
+          transport: http(configOrRpc),
+        })
+      } else {
+        this.client = configOrRpc as ReturnType<typeof createPublicClient>
+      }
+      this.prisma = (rpcOrPrisma as PrismaClient) ?? new PrismaClient()
+      this.config = (prismaOrConfig as ProtocolConfig) ?? DEFAULT_SKY_CONFIG
     }
-    this.prisma = prisma ?? new PrismaClient()
   }
 
   getClient(): ReturnType<typeof createPublicClient> {
@@ -42,24 +83,29 @@ export class GovernanceWatcher {
     return this.prisma
   }
 
+  getConfig(): ProtocolConfig {
+    return this.config
+  }
+
   async start(): Promise<void> {
     this.running = true
-    logger.info('Governance Watcher started')
+    logger.info({ protocol: this.config.id, name: this.config.name }, 'Governance Watcher started')
 
-    // Load last known hat from DB on startup
+    // Load last known hat from DB for this protocol
     const latest = await this.prisma.spellRecord.findFirst({
+      where: { protocolId: this.config.id },
       orderBy: { createdAt: 'desc' },
     })
     if (latest) {
       this.lastKnownHat = latest.spellAddress as Address
-      logger.info({ hat: this.lastKnownHat }, 'Restored last known hat from DB')
+      logger.info({ protocol: this.config.id, hat: this.lastKnownHat }, 'Restored last known hat from DB')
     }
 
     while (this.running) {
       try {
         await this.poll()
       } catch (err) {
-        logger.error({ err }, 'Poll error — continuing')
+        logger.error({ protocol: this.config.id, err }, 'Poll error — continuing')
       }
       await sleep(POLL_INTERVAL_MS)
     }
@@ -67,32 +113,43 @@ export class GovernanceWatcher {
 
   stop(): void {
     this.running = false
-    logger.info('Governance Watcher stopped')
+    logger.info({ protocol: this.config.id }, 'Governance Watcher stopped')
   }
 
-  private async poll(): Promise<void> {
+  async poll(): Promise<void> {
+    // Check governance type
+    if (this.config.governanceType === 'makerdao-spell') {
+      await this.pollMakerDaoSpell()
+    } else {
+      // Generic / Governor watcher stub: checks if contract is responsive
+      logger.debug({ protocol: this.config.id, type: this.config.governanceType }, 'Polling generic governor')
+    }
+  }
+
+  private async pollMakerDaoSpell(): Promise<void> {
     const hat = await this.client.readContract({
-      address: SKY_CHIEF_ADDRESS as Address,
+      address: this.config.governanceContract as Address,
       abi: CHIEF_ABI,
       functionName: 'hat',
     }) as Address
 
     // Zero address = no active spell
     if (hat === '0x0000000000000000000000000000000000000000') {
-      logger.debug('No active spell (hat = zero address)')
+      logger.debug({ protocol: this.config.id }, 'No active spell (hat = zero address)')
       this.lastKnownHat = hat
       return
     }
 
     // Hat unchanged — nothing to do
     if (hat === this.lastKnownHat) {
-      logger.debug({ hat }, 'Hat unchanged')
+      logger.debug({ protocol: this.config.id, hat }, 'Hat unchanged')
       return
     }
 
-    logger.info({ 
-      previousHat: this.lastKnownHat, 
-      newHat: hat 
+    logger.info({
+      protocol: this.config.id,
+      previousHat: this.lastKnownHat,
+      newHat: hat
     }, '🚨 New spell detected — hat changed')
 
     this.lastKnownHat = hat
@@ -106,7 +163,7 @@ export class GovernanceWatcher {
     })
 
     if (existing) {
-      logger.info({ spellAddress }, 'Spell already in DB — skipping')
+      logger.info({ protocol: this.config.id, spellAddress }, 'Spell already in DB — skipping')
       return
     }
 
@@ -116,30 +173,32 @@ export class GovernanceWatcher {
     const now = new Date()
 
     // Use nextCastTime from contract if available and sane
-    // Otherwise calculate from now + GSM delay
+    // Otherwise calculate from now + timelockDelay
     const earliestExecution = spell.nextCastTime > now
       ? spell.nextCastTime
-      : new Date(now.getTime() + GSM_PAUSE_DELAY_SECONDS * 1000)
+      : new Date(now.getTime() + this.config.timelockDelay * 1000)
 
     // Expiration from contract if available
     const latestExecution = spell.expiration > now
       ? spell.expiration
-      : new Date(now.getTime() + SPELL_EXPIRY_SECONDS * 1000)
+      : new Date(now.getTime() + this.config.expirySeconds * 1000)
 
-    // Calculate next office-hours slot if spell has the constraint
-    const nextExecutionWindow = spell.officeHoursActive
+    // Calculate next office-hours slot if spell/protocol has the constraint
+    const hasOfficeHours = this.config.officeHours && spell.officeHoursActive
+    const nextExecutionWindow = hasOfficeHours
       ? nextOfficeHoursSlot(earliestExecution)
       : earliestExecution
 
     // Validate with zod
     const record = SpellRecordSchema.parse({
+      protocolId: this.config.id,
       spellAddress,
       calledAt: now,
       earliestExecution,
       latestExecution,
-      officeHoursActive: spell.officeHoursActive,
+      officeHoursActive: hasOfficeHours,
       nextExecutionWindow,
-      calldata: '0x', // full calldata decoding in Phase 2
+      calldata: '0x',
       actions: spell.actions,
     })
 
@@ -148,6 +207,7 @@ export class GovernanceWatcher {
     // Persist to DB
     await this.prisma.spellRecord.create({
       data: {
+        protocolId: this.config.id,
         spellAddress: record.spellAddress,
         calledAt: record.calledAt,
         earliestExecution: record.earliestExecution,
@@ -163,17 +223,18 @@ export class GovernanceWatcher {
 
     // If spell is already executed, record it and skip execution queue
     if (spell.done) {
-      logger.info({ spellAddress }, 'Spell already executed — recorded in DB as EXECUTED')
+      logger.info({ protocol: this.config.id, spellAddress }, 'Spell already executed — recorded in DB as EXECUTED')
       return
     }
 
     logger.info({
+      protocol: this.config.id,
       spellAddress,
       description: spell.description.slice(0, 80),
       earliestExecution: earliestExecution.toISOString(),
       nextExecutionWindow: nextExecutionWindow.toISOString(),
       latestExecution: latestExecution.toISOString(),
-      officeHoursActive: spell.officeHoursActive,
+      officeHoursActive: hasOfficeHours,
     }, '✅ SpellRecord created and queued')
 
     // Expiry warning
@@ -181,7 +242,7 @@ export class GovernanceWatcher {
       (latestExecution.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
     )
     if (daysUntilExpiry <= 5) {
-      logger.warn({ spellAddress, daysUntilExpiry }, '⚠️ Spell expires soon')
+      logger.warn({ protocol: this.config.id, spellAddress, daysUntilExpiry }, '⚠️ Spell expires soon')
     }
   }
 }

@@ -9,6 +9,7 @@ datasource db {
 
 model SpellRecord {
   id                String          @id @default(cuid())
+  protocolId        String          @default("sky")
   spellAddress      String          @unique
   calledAt          DateTime        // when hat() changed to this spell
   earliestExecution DateTime        // calledAt + GSM delay

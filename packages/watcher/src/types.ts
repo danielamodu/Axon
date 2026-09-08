@@ -8,6 +8,7 @@ export const SpellActionSchema = z.object({
 })
 
 export const SpellRecordSchema = z.object({
+  protocolId: z.string().default('sky'),
   spellAddress: z.string(),
   calledAt: z.date(),
   earliestExecution: z.date(),

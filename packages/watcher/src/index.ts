@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { GovernanceWatcher } from './watcher'
+import { WatcherManager } from './protocols/watcher-manager'
 import { StateProjector } from './projector'
 import { ConflictDetector } from './conflict-detector'
 import { ExecutionEngine } from './executor'
@@ -11,12 +11,17 @@ import { logger } from './logger'
 const rpcUrl = process.env.ETH_RPC_URL
 if (!rpcUrl) throw new Error('ETH_RPC_URL not set')
 
-const watcher = new GovernanceWatcher(rpcUrl)
-const projector = new StateProjector(watcher.getClient(), watcher.getPrisma())
-const conflictDetector = new ConflictDetector(watcher.getPrisma())
+const manager = new WatcherManager()
+manager.loadConfigs()
+
+const client = manager.getClient()
+const prisma = manager.getPrisma()
+
+const projector = new StateProjector(client, prisma)
+const conflictDetector = new ConflictDetector(prisma)
 const notify = new NotificationDispatcher()
 const registryWriter = new RegistryWriter()
-const executor = new ExecutionEngine(watcher.getClient(), watcher.getPrisma(), notify, undefined, registryWriter)
+const executor = new ExecutionEngine(client, prisma, notify, undefined, registryWriter)
 const webhookServer = new WebhookServer(registryWriter)
 
 let shuttingDown = false
@@ -26,7 +31,7 @@ async function shutdown() {
   shuttingDown = true
 
   logger.info('Shutting down services...')
-  watcher.stop()
+  manager.stopAll()
   projector.stop()
   conflictDetector.stop()
   executor.stop()
@@ -46,7 +51,7 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
 Promise.all([
-  watcher.start(),
+  manager.startAll(),
   projector.start(),
   conflictDetector.start(),
   executor.start(),

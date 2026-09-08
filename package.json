@@ -9,7 +9,11 @@
   "scripts": {
     "dev:watcher": "npm --workspace=packages/watcher run dev",
     "start:watcher": "npm --workspace=packages/watcher run start",
+    "start:mcp": "npm --workspace=@axon/mcp-server run start",
+    "build:cli": "npm --workspace=@axon/cli run build",
     "test:watcher": "npm --workspace=packages/watcher run test",
+    "test:mcp": "npm --workspace=@axon/mcp-server run test",
+    "test:cli": "npm --workspace=@axon/cli run test",
     "test": "npm run test:watcher -- --run",
     "db:push": "npm --workspace=packages/watcher run db:push",
     "db:generate": "npm --workspace=packages/watcher run db:generate",

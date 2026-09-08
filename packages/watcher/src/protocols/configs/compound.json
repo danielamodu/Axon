@@ -1,0 +1,13 @@
+{
+  "id": "compound",
+  "name": "Compound",
+  "chainId": 1,
+  "governanceContract": "0xc0Da02939E1441F497fd74F78cE7Decb17B66529",
+  "governanceType": "compound-governor",
+  "executionMethod": "queue-execute",
+  "timelockDelay": 172800,
+  "officeHours": false,
+  "expirySeconds": 1209600,
+  "network": "mainnet",
+  "tags": ["lending"]
+}

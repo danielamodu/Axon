@@ -1,0 +1,16 @@
+{
+  "id": "sky",
+  "name": "Sky Protocol",
+  "chainId": 1,
+  "governanceContract": "0x0a3f6849f78076aefaDf113F5BED87720274dDC0",
+  "governanceType": "makerdao-spell",
+  "executionMethod": "cast",
+  "timelockDelay": 172800,
+  "officeHours": true,
+  "officeHoursStart": 14,
+  "officeHoursEnd": 21,
+  "officeDays": [1, 2, 3, 4, 5],
+  "expirySeconds": 2592000,
+  "network": "mainnet",
+  "tags": ["stablecoin", "lending"]
+}

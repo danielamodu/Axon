@@ -1,0 +1,13 @@
+{
+  "id": "aave",
+  "name": "Aave",
+  "chainId": 1,
+  "governanceContract": "0x9AEE0B04504CeF83A65AC3f0e838D0593BCb2BC7",
+  "governanceType": "openzeppelin-governor",
+  "executionMethod": "execute",
+  "timelockDelay": 86400,
+  "officeHours": false,
+  "expirySeconds": 864000,
+  "network": "mainnet",
+  "tags": ["lending"]
+}

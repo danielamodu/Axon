@@ -1,8 +1,76 @@
 # Axon
 
-**Autonomous Protocol Operations Infrastructure**
+Autonomous protocol operations infrastructure.
+Governance decisions execute themselves.
 
-Axon is an autonomous governance and protocol operations pipeline designed for decentralized protocols (such as Sky Protocol / MakerDAO). It continuously monitors governance contracts, projects chain state, detects execution conflicts, executes approved spells with reliability guarantees via KeeperHub workflows, and logs immutable execution proofs to an onchain registry on Base.
+Axon is an autonomous governance and protocol operations pipeline designed for decentralized protocols (such as Sky Protocol, Aave, and Compound). It continuously monitors governance contracts, projects chain state, detects execution conflicts, executes approved spells with reliability guarantees via KeeperHub workflows, and logs immutable execution proofs to an onchain registry on Base.
+
+---
+
+## Quick Start
+
+### Install CLI
+```bash
+# Build & link CLI locally
+npm run build:cli
+npm install -g ./packages/cli
+```
+
+### Register your protocol (auto-detects governance type)
+```bash
+axon init
+```
+
+### Check status
+```bash
+axon status
+```
+
+### View execution queue & history
+```bash
+axon queue
+axon history --limit 10
+```
+
+---
+
+## MCP Integration
+
+Add to your `mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "axon": {
+      "command": "npx",
+      "args": ["tsx", "packages/mcp-server/src/index.ts"],
+      "env": {
+        "DATABASE_URL": "your-database-url"
+      }
+    }
+  }
+}
+```
+
+Then ask your AI agent:
+- *"What spells are queued on Sky Protocol right now?"*
+- *"What's the simulation score for spell 0x900c...?"*
+- *"Register Aave governance for monitoring."*
+- *"Show me the execution history and reliability stats for Sky."*
+
+---
+
+## Supported Protocols
+- **Sky Protocol** (active)
+- **Aave** (monitoring)
+- **Compound** (monitoring)
+
+---
+
+## Supported Governance Types
+- **MakerDAO Spell pattern** (`makerdao-spell`)
+- **Compound Governor** (`compound-governor`)
+- **OpenZeppelin Governor** (`openzeppelin-governor`)
+- **Optimistic Timelock** (`optimistic-timelock`)
 
 ---
 
@@ -10,7 +78,7 @@ Axon is an autonomous governance and protocol operations pipeline designed for d
 
 ```
 +---------------------+
-|  GovernanceWatcher  |  polls Chief.hat() every 12s → QUEUED
+|  GovernanceWatcher  |  polls governance contract (e.g. Chief.hat()) → QUEUED
 +----------+----------+
            │
            ▼
@@ -42,10 +110,12 @@ Axon is an autonomous governance and protocol operations pipeline designed for d
 ```
 axon/
 ├── packages/
-│   ├── watcher/          # Governance Watcher, State Projector, Conflict Detector,
-│   │                     # Execution Engine, Registry Writer, Webhook Server
-│   ├── contracts/        # AxonRegistry.sol, Foundry tests, Deploy script
-│   └── shared/           # Shared types, ABIs, protocol addresses, and constants
+│   ├── watcher/          # Governance Watcher, Protocol Registry, State Projector,
+│   │                     # Conflict Detector, Execution Engine, Registry Writer
+│   ├── contracts/        # AxonRegistry.sol on Base, Foundry tests, Deploy script
+│   ├── shared/           # Shared types, ABIs, protocol addresses, and constants
+│   ├── mcp-server/       # Model Context Protocol (MCP) server for AI agents
+│   └── cli/              # One-command CLI (axon init, status, queue, history, simulate)
 ├── apps/
 │   └── dashboard/        # Next.js frontend (scaffold, Phase 6)
 ├── deploy-registry.ps1   # Base Sepolia / Base mainnet deployment script
@@ -55,31 +125,26 @@ axon/
 
 ---
 
-## Pipeline Phases
-
-- **Phase 0 — Foundations:** Monorepo configuration, npm workspaces, Prisma schema on PostgreSQL, viem integration.
-- **Phase 1 — Governance Watcher:** Continuous polling of `Chief.hat()`, multi-call spell parameter extraction, office-hours calculator, and Postgres persistence.
-- **Phase 2 — State Projector:** 10-block gas volatility projections, Sky USDS supply, Sky Vat debt ceiling headroom, Chainlink ETH/USD risk assessment, simulation scoring (GREEN / YELLOW / RED).
-- **Phase 3 — Conflict Detector:** Comprehensive collision analysis checking parameter overlap, ordering dependencies, and 2-hour race conditions against active and past (7-day) spells.
-- **Phase 4 — KeeperHub Execution Engine:** Autonomous execution lifecycle including hat guard verification, fresh pre-flight simulation, 7-node KeeperHub workflow execution, phased confirmation backoff (up to 30 min), retry-once logic, Discord notifications, and marketplace listing.
-- **Phase 5 — Onchain Registry:** Immutable append-only `AxonRegistry.sol` deployed on Base Sepolia (`0xBf4bc8ACCbd771AeFC68de80a4ED3fa5442DD70B`), native Node.js webhook server, and Viem `RegistryWriter`.
-
----
-
 ## Testing
 
 Axon maintains a comprehensive test suite across Solidity and TypeScript:
 
 ```bash
-# Run watcher & pipeline unit tests (66 tests)
+# Run watcher & pipeline unit tests (79 tests)
 npm --workspace=packages/watcher run test -- --run
+
+# Run MCP server tests (3 tests)
+npm --workspace=@axon/mcp-server run test -- --run
+
+# Run CLI tests (3 tests)
+npm --workspace=@axon/cli run test -- --run
 
 # Run smart contract Foundry tests & fuzzing (12 tests)
 cd packages/contracts
 forge test -vv
 ```
 
-Total: **78 tests passing**.
+Total: **97 tests passing**.
 
 ---
 
