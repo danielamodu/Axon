@@ -24,7 +24,7 @@ function getConfigsDir(): string {
   return candidates[0]
 }
 
-const prisma = new PrismaClient()
+export const prisma = new PrismaClient()
 
 // Initialize MCP Server
 export const server = new McpServer({
@@ -57,11 +57,61 @@ export function loadAllConfigs(): any[] {
 }
 
 // ---------------------------------------------------------------------------
+// Authentication Helper
+// ---------------------------------------------------------------------------
+export interface AuthResult {
+  authorized: boolean
+  org?: { id: string; name: string; apiKey: string }
+  error?: string
+}
+
+export async function authenticateMcp(reqApiKey?: string): Promise<AuthResult> {
+  const apiKey = (reqApiKey ?? process.env.AXON_API_KEY)?.trim()
+  if (!apiKey) {
+    return {
+      authorized: false,
+      error: 'Unauthorized. Set AXON_API_KEY.',
+    }
+  }
+
+  // Allow bypass in test mode with demo mock
+  if (process.env.NODE_ENV === 'test' && apiKey === 'test-key') {
+    return {
+      authorized: true,
+      org: { id: 'test_org_default', name: 'Test Organisation', apiKey: 'test-key' },
+    }
+  }
+
+  try {
+    const org = await prisma.organisation.findUnique({
+      where: { apiKey },
+    })
+
+    if (!org) {
+      return {
+        authorized: false,
+        error: 'Unauthorized. Invalid AXON_API_KEY.',
+      }
+    }
+
+    return {
+      authorized: true,
+      org: { id: org.id, name: org.name, apiKey: org.apiKey },
+    }
+  } catch (err: any) {
+    return {
+      authorized: false,
+      error: `Database authentication error: ${err.message}`,
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool 1: get_queue
 // ---------------------------------------------------------------------------
 server.tool(
   'get_queue',
-  'Get all spells currently in the Axon execution queue',
+  'Get all spells currently in the Axon execution queue for the authenticated organisation',
   {
     protocolId: z.string().optional().describe('Filter by protocol ID (e.g. "sky", "aave")'),
     status: z.enum([
@@ -77,13 +127,40 @@ server.tool(
     ]).optional().describe('Filter by spell status'),
   },
   async ({ protocolId, status }) => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
+    // Scoping to this organisation's registered protocols
+    const orgProtocols = await prisma.protocol.findMany({
+      where: { orgId: auth.org.id },
+    })
+    const orgProtoIds = orgProtocols.map((p) => p.id)
+
     const where: any = {}
     if (protocolId) where.protocolId = protocolId
     if (status) {
       where.status = status
     } else {
-      // Default queue is anything not yet executed or failed
       where.status = { in: ['QUEUED', 'SIMULATING', 'CONFLICT', 'READY', 'EXECUTING', 'HELD'] }
+    }
+
+    // Include spells owned by this org or protocols owned by this org
+    if (orgProtoIds.length > 0) {
+      where.OR = [
+        { orgId: auth.org.id },
+        { protocolId: { in: orgProtoIds } },
+      ]
+    } else {
+      // Sky/default backwards-compatibility if no protocols yet registered
+      where.OR = [
+        { orgId: auth.org.id },
+        { orgId: null },
+      ]
     }
 
     const spells = await prisma.spellRecord.findMany({
@@ -114,14 +191,39 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   'get_execution_history',
-  'Get execution history for a protocol',
+  'Get execution history for the authenticated organisation',
   {
     protocolId: z.string().optional().describe('Filter by protocol ID (e.g. "sky")'),
     limit: z.number().int().positive().optional().describe('Max records to return (default 20)'),
   },
   async ({ protocolId, limit = 20 }) => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
+    const orgProtocols = await prisma.protocol.findMany({
+      where: { orgId: auth.org.id },
+    })
+    const orgProtoIds = orgProtocols.map((p) => p.id)
+
     const where: any = { status: 'EXECUTED' }
     if (protocolId) where.protocolId = protocolId
+
+    if (orgProtoIds.length > 0) {
+      where.OR = [
+        { orgId: auth.org.id },
+        { protocolId: { in: orgProtoIds } },
+      ]
+    } else {
+      where.OR = [
+        { orgId: auth.org.id },
+        { orgId: null },
+      ]
+    }
 
     const history = await prisma.spellRecord.findMany({
       where,
@@ -150,18 +252,34 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   'get_protocol_stats',
-  'Get reliability stats for a monitored protocol',
+  'Get reliability stats for a monitored protocol in the organisation',
   {
     protocolId: z.string().describe('Protocol identifier e.g. "sky"'),
   },
   async ({ protocolId }) => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
     const executed = await prisma.spellRecord.findMany({
-      where: { protocolId, status: 'EXECUTED' },
+      where: {
+        protocolId,
+        status: 'EXECUTED',
+        OR: [{ orgId: auth.org.id }, { orgId: null }],
+      },
       orderBy: { executedAt: 'desc' },
     })
 
     const failed = await prisma.spellRecord.count({
-      where: { protocolId, status: 'FAILED' },
+      where: {
+        protocolId,
+        status: 'FAILED',
+        OR: [{ orgId: auth.org.id }, { orgId: null }],
+      },
     })
 
     const total = executed.length + failed
@@ -190,6 +308,7 @@ server.tool(
           text: JSON.stringify(
             {
               protocolId,
+              orgId: auth.org.id,
               totalExecutions: executed.length,
               totalFailed: failed,
               avgDelayHours: Number(avgDelayHours),
@@ -215,11 +334,19 @@ server.tool(
     protocolId: z.string().describe('Protocol identifier e.g. "sky"'),
   },
   async ({ protocolId }) => {
-    // Find the latest active (non-executed, non-failed) spell or most recent
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
     const active = await prisma.spellRecord.findFirst({
       where: {
         protocolId,
         status: { in: ['READY', 'EXECUTING', 'SIMULATING', 'QUEUED'] },
+        OR: [{ orgId: auth.org.id }, { orgId: null }],
       },
       orderBy: { nextExecutionWindow: 'asc' },
     })
@@ -240,7 +367,7 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   'register_protocol',
-  'Register a new protocol for Axon to monitor',
+  'Register a new protocol for Axon to monitor under the organisation',
   {
     id: z.string().min(1),
     name: z.string().min(1),
@@ -264,13 +391,37 @@ server.tool(
     tags: z.array(z.string()).optional(),
   },
   async (config) => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
+    // Save to file
     const dir = getConfigsDir()
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true })
     }
-
     const filePath = path.join(dir, `${config.id}.json`)
     fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf-8')
+
+    // Persist to DB linked to organisation
+    await prisma.protocol.upsert({
+      where: { id: config.id },
+      create: {
+        id: config.id,
+        orgId: auth.org.id,
+        config: config as any,
+        status: 'MONITORING',
+      },
+      update: {
+        orgId: auth.org.id,
+        config: config as any,
+        status: 'MONITORING',
+      },
+    })
 
     return {
       content: [
@@ -278,8 +429,9 @@ server.tool(
           type: 'text',
           text: JSON.stringify({
             success: true,
+            orgId: auth.org.id,
             protocolId: config.id,
-            message: `Protocol ${config.name} (${config.id}) registered successfully. Saved to ${filePath}`,
+            message: `Protocol ${config.name} (${config.id}) registered under ${auth.org.name}. Saved to ${filePath}`,
           }),
         },
       ],
@@ -297,6 +449,14 @@ server.tool(
     spellAddress: z.string().describe('The contract address of the spell'),
   },
   async ({ spellAddress }) => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
     const spell = await prisma.spellRecord.findUnique({
       where: { spellAddress },
     })
@@ -324,13 +484,29 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   'list_protocols',
-  'List all protocols Axon is monitoring',
+  'List all protocols Axon is monitoring for the authenticated organisation',
   async () => {
+    const auth = await authenticateMcp()
+    if (!auth.authorized || !auth.org) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }],
+      }
+    }
+
+    const dbProtocols = await prisma.protocol.findMany({
+      where: { orgId: auth.org.id },
+    })
+
     const configs = loadAllConfigs()
-    const result = configs.map((c) => ({
-      ...c,
-      status: c.id === 'sky' ? 'ACTIVE' : 'MONITORING',
-    }))
+    const result = configs.map((c) => {
+      const match = dbProtocols.find((p) => p.id === c.id)
+      return {
+        ...c,
+        status: match ? match.status : c.id === 'sky' ? 'ACTIVE' : 'MONITORING',
+        orgId: auth.org.id,
+      }
+    })
 
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -347,10 +523,30 @@ export function startHttpServer(port = 3002): http.Server {
 
     res.setHeader('Content-Type', 'application/json')
     res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key')
+
+    if (method === 'OPTIONS') {
+      res.writeHead(204)
+      res.end()
+      return
+    }
 
     if (method === 'GET' && url === '/health') {
       res.writeHead(200)
       res.end(JSON.stringify({ ok: true, name: 'axon-mcp-server', port }))
+      return
+    }
+
+    // Authenticate all protected HTTP endpoints
+    const authHeader = req.headers['authorization'] || req.headers['x-api-key']
+    const token = typeof authHeader === 'string'
+      ? authHeader.replace(/^Bearer\s+/i, '').trim()
+      : undefined
+
+    const auth = await authenticateMcp(token)
+    if (!auth.authorized || !auth.org) {
+      res.writeHead(401)
+      res.end(JSON.stringify({ error: auth.error ?? 'Unauthorized. Set AXON_API_KEY.' }))
       return
     }
 
@@ -362,7 +558,10 @@ export function startHttpServer(port = 3002): http.Server {
 
     if (method === 'GET' && url?.startsWith('/queue')) {
       const spells = await prisma.spellRecord.findMany({
-        where: { status: { in: ['QUEUED', 'SIMULATING', 'CONFLICT', 'READY', 'EXECUTING', 'HELD'] } },
+        where: {
+          status: { in: ['QUEUED', 'SIMULATING', 'CONFLICT', 'READY', 'EXECUTING', 'HELD'] },
+          OR: [{ orgId: auth.org.id }, { orgId: null }],
+        },
         orderBy: { nextExecutionWindow: 'asc' },
       })
       res.writeHead(200)
@@ -382,12 +581,15 @@ export function startHttpServer(port = 3002): http.Server {
           if (toolName === 'list_protocols') {
             const configs = loadAllConfigs()
             res.writeHead(200)
-            res.end(JSON.stringify({ result: configs }))
+            res.end(JSON.stringify({ result: configs, orgId: auth.org!.id }))
             return
           }
           if (toolName === 'get_queue') {
             const spells = await prisma.spellRecord.findMany({
-              where: args.status ? { status: args.status } : undefined,
+              where: {
+                ...(args.status ? { status: args.status } : {}),
+                OR: [{ orgId: auth.org!.id }, { orgId: null }],
+              },
               orderBy: { nextExecutionWindow: 'asc' },
             })
             res.writeHead(200)
@@ -409,7 +611,7 @@ export function startHttpServer(port = 3002): http.Server {
   })
 
   httpServer.listen(port, () => {
-    // Info log
+    // Server started
   })
 
   return httpServer
@@ -422,6 +624,12 @@ async function main() {
   const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 
   if (isDirectRun || process.env.RUN_MCP_SERVER) {
+    // Require AXON_API_KEY to run
+    if (!process.env.AXON_API_KEY) {
+      console.error('Error: Unauthorized. Set AXON_API_KEY.')
+      process.exit(1)
+    }
+
     // Start HTTP server on 3002
     startHttpServer(3002)
 

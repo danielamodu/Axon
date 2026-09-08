@@ -28,4 +28,25 @@ describe('@axon/mcp-server', () => {
     expect(ids).toContain('aave')
     expect(ids).toContain('compound')
   })
+
+  it('rejects unauthenticated requests when AXON_API_KEY is not set', async () => {
+    const { authenticateMcp } = await import('../index.js')
+    const oldKey = process.env.AXON_API_KEY
+    delete process.env.AXON_API_KEY
+    try {
+      const res = await authenticateMcp()
+      expect(res.authorized).toBe(false)
+      expect(res.error).toContain('Unauthorized. Set AXON_API_KEY.')
+    } finally {
+      if (oldKey) process.env.AXON_API_KEY = oldKey
+    }
+  })
+
+  it('authenticates valid key in test mode', async () => {
+    const { authenticateMcp } = await import('../index.js')
+    const res = await authenticateMcp('test-key')
+    expect(res.authorized).toBe(true)
+    expect(res.org).toBeDefined()
+    expect(res.org?.id).toBe('test_org_default')
+  })
 })

@@ -7,26 +7,48 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Organisation {
+  id              String        @id @default(cuid())
+  name            String
+  apiKey          String        @unique @default(cuid())
+  email           String?
+  discordWebhook  String?
+  createdAt       DateTime      @default(now())
+  protocols       Protocol[]
+  executions      SpellRecord[]
+}
+
+model Protocol {
+  id          String        @id @default(cuid())
+  orgId       String
+  org         Organisation  @relation(fields: [orgId], references: [id])
+  config      Json          // ProtocolConfig stored here
+  status      String        @default("MONITORING")
+  createdAt   DateTime      @default(now())
+}
+
 model SpellRecord {
-  id                String          @id @default(cuid())
-  protocolId        String          @default("sky")
-  spellAddress      String          @unique
-  calledAt          DateTime        // when hat() changed to this spell
-  earliestExecution DateTime        // calledAt + GSM delay
-  latestExecution   DateTime        // calledAt + 30 days
-  officeHoursActive Boolean
-  nextExecutionWindow DateTime      // first valid office-hours slot
-  calldata          String          // raw calldata hex
-  actions           Json            // parsed action list
-  status            SpellStatus     @default(QUEUED)
-  simulationScore   SimulationScore?
-  conflictStatus    ConflictStatus?
-  conflictDetail    String?
-  executedAt        DateTime?
-  txHash            String?
-  gasUsed           BigInt?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  id                  String          @id @default(cuid())
+  orgId               String?
+  org                 Organisation?   @relation(fields: [orgId], references: [id])
+  protocolId          String          @default("sky")
+  spellAddress        String          @unique
+  calledAt            DateTime        // when hat() changed to this spell
+  earliestExecution   DateTime        // calledAt + GSM delay
+  latestExecution     DateTime        // calledAt + 30 days
+  officeHoursActive   Boolean
+  nextExecutionWindow DateTime        // first valid office-hours slot
+  calldata            String          // raw calldata hex
+  actions             Json            // parsed action list
+  status              SpellStatus     @default(QUEUED)
+  simulationScore     SimulationScore?
+  conflictStatus      ConflictStatus?
+  conflictDetail      String?
+  executedAt          DateTime?
+  txHash              String?
+  gasUsed             BigInt?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
 }
 
 enum SpellStatus {

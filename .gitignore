@@ -22,7 +22,9 @@ broadcast/
 
 # Next.js / Build Outputs
 .next/
+**/.next/
 dist/
+**/dist/
 build/
 coverage/
 

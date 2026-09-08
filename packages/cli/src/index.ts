@@ -11,6 +11,8 @@ import Table from 'cli-table3'
 import { createPublicClient, http, isAddress, type Address } from 'viem'
 import { mainnet, base, arbitrum, optimism } from 'viem/chains'
 import { PrismaClient } from '@prisma/client'
+import { loadCredentials, saveCredentials, maskApiKey, getCredentialsPath } from './credentials.js'
+import { generateApiKey, validateApiKey, rotateApiKey } from './auth.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -189,6 +191,56 @@ program
 
     console.log(chalk.green(`\n✅ Protocol registered. Axon is now watching ${chalk.bold(answers.name)}!`))
     console.log(chalk.gray(`Config saved to: ${filePath}\n`))
+
+    // Workspace & Auth Flow
+    let creds = loadCredentials()
+    if (!creds) {
+      console.log(chalk.bold.cyan('🏢 Axon Workspace Setup'))
+      const wsPrompt = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'createWorkspace',
+          message: 'Create your Axon workspace (free)?',
+          default: true,
+        },
+        {
+          type: 'input',
+          name: 'orgName',
+          message: 'Organisation / Team name:',
+          default: `${answers.name} Ops`,
+          when: (a) => a.createWorkspace,
+        },
+        {
+          type: 'input',
+          name: 'email',
+          message: 'Notification email (optional):',
+          when: (a) => a.createWorkspace,
+        },
+      ])
+
+      if (wsPrompt.createWorkspace) {
+        const spinnerOrg = ora('Creating Axon workspace and generating API key...').start()
+        try {
+          const { org, apiKey } = await generateApiKey(wsPrompt.orgName, wsPrompt.email)
+          creds = {
+            orgId: org.id,
+            orgName: org.name,
+            apiKey,
+            email: org.email,
+            createdAt: org.createdAt.toISOString(),
+          }
+          saveCredentials(creds)
+          spinnerOrg.succeed(`Workspace created: ${chalk.bold.green(org.name)}`)
+          console.log(chalk.gray(`API Key: ${maskApiKey(apiKey)} (saved to ${getCredentialsPath()})`))
+          console.log(chalk.bold.cyan(`Your dashboard: axon.xyz/dashboard\n`))
+        } catch (err: any) {
+          spinnerOrg.fail(`Failed to auto-generate workspace: ${err.message}`)
+        }
+      }
+    } else {
+      console.log(chalk.gray(`Active workspace: ${creds.orgName} (${maskApiKey(creds.apiKey)})`))
+      console.log(chalk.bold.cyan(`Your dashboard: axon.xyz/dashboard\n`))
+    }
   })
 
 // ---------------------------------------------------------------------------
@@ -448,6 +500,189 @@ program
     )
     console.log(table.toString())
     console.log(chalk.green('✓ Spell is READY for execution window.\n'))
+  })
+
+// ---------------------------------------------------------------------------
+// axon login
+// ---------------------------------------------------------------------------
+program
+  .command('login')
+  .description('Authenticate CLI with an Axon workspace')
+  .option('-k, --key <apiKey>', 'Axon API key (e.g. axon_live_...)')
+  .option('-o, --org <orgName>', 'Organisation or team name')
+  .option('-e, --email <email>', 'Associated email address')
+  .action(async (opts) => {
+    // If API key is provided directly
+    if (opts.key) {
+      const spinner = ora('Validating API key...').start()
+      const org = await validateApiKey(opts.key)
+      if (!org) {
+        spinner.fail(chalk.red('Invalid API key. Please check your key.'))
+        process.exit(1)
+      }
+      saveCredentials({
+        orgId: org.id,
+        orgName: org.name,
+        apiKey: opts.key,
+        email: org.email,
+        createdAt: org.createdAt.toISOString(),
+      })
+      spinner.succeed(`Authenticated as ${chalk.bold.green(org.name)}`)
+      console.log(chalk.gray(`Saved credentials to ${getCredentialsPath()}\n`))
+      return
+    }
+
+    // If org name provided directly via flag
+    if (opts.org) {
+      const spinner = ora(`Creating workspace for ${opts.org}...`).start()
+      try {
+        const { org, apiKey } = await generateApiKey(opts.org, opts.email)
+        saveCredentials({
+          orgId: org.id,
+          orgName: org.name,
+          apiKey,
+          email: org.email,
+          createdAt: org.createdAt.toISOString(),
+        })
+        spinner.succeed(`Created and authenticated workspace: ${chalk.bold.green(org.name)}`)
+        console.log(chalk.bold(`Your API Key: ${chalk.yellow(apiKey)}`))
+        console.log(chalk.gray(`Saved to ${getCredentialsPath()}\n`))
+        return
+      } catch (e: any) {
+        spinner.fail(`Failed to create workspace: ${e.message}`)
+        process.exit(1)
+      }
+    }
+
+    // Interactive login / workspace setup
+    console.log(chalk.bold.cyan('\n⚡ Axon Login & Authentication\n'))
+    const answers = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'mode',
+        message: 'How would you like to authenticate?',
+        choices: [
+          { name: 'Enter an existing API key', value: 'existing' },
+          { name: 'Create a new organisation workspace', value: 'create' },
+        ],
+      },
+      {
+        type: 'input',
+        name: 'apiKey',
+        message: 'Enter your Axon API key:',
+        when: (a) => a.mode === 'existing',
+        validate: (input) =>
+          input.trim().startsWith('axon_live_') || input.trim().length > 10
+            ? true
+            : 'Please enter a valid API key',
+      },
+      {
+        type: 'input',
+        name: 'orgName',
+        message: 'Organisation name:',
+        default: opts.org ?? 'My Organisation',
+        when: (a) => a.mode === 'create',
+        validate: (input) => (input.trim().length > 0 ? true : 'Organisation name cannot be empty'),
+      },
+      {
+        type: 'input',
+        name: 'email',
+        message: 'Notification email (optional):',
+        default: opts.email ?? '',
+        when: (a) => a.mode === 'create',
+      },
+    ])
+
+    if (answers.mode === 'existing') {
+      const spinner = ora('Validating API key...').start()
+      const org = await validateApiKey(answers.apiKey)
+      if (!org) {
+        spinner.fail(chalk.red('Invalid API key.'))
+        process.exit(1)
+      }
+      saveCredentials({
+        orgId: org.id,
+        orgName: org.name,
+        apiKey: answers.apiKey.trim(),
+        email: org.email,
+        createdAt: org.createdAt.toISOString(),
+      })
+      spinner.succeed(`Authenticated as ${chalk.bold.green(org.name)}`)
+      console.log(chalk.gray(`Credentials stored at ${getCredentialsPath()}\n`))
+    } else {
+      const spinner = ora('Creating workspace and generating API key...').start()
+      try {
+        const { org, apiKey } = await generateApiKey(answers.orgName, answers.email)
+        saveCredentials({
+          orgId: org.id,
+          orgName: org.name,
+          apiKey,
+          email: org.email,
+          createdAt: org.createdAt.toISOString(),
+        })
+        spinner.succeed(`Created and authenticated workspace: ${chalk.bold.green(org.name)}`)
+        console.log(chalk.bold(`Your API Key: ${chalk.yellow(apiKey)}`))
+        console.log(chalk.gray(`Saved to ${getCredentialsPath()}\n`))
+      } catch (e: any) {
+        spinner.fail(`Failed to create workspace: ${e.message}`)
+        process.exit(1)
+      }
+    }
+  })
+
+// ---------------------------------------------------------------------------
+// axon whoami
+// ---------------------------------------------------------------------------
+program
+  .command('whoami')
+  .description('Print current logged-in organisation and masked API key')
+  .action(async () => {
+    const creds = loadCredentials()
+    if (!creds) {
+      console.log(chalk.yellow('\n⚠️  Not logged in. Run "axon login" or "axon init" to authenticate.\n'))
+      return
+    }
+
+    console.log(chalk.bold.cyan('\n⚡ Axon Account\n'))
+    console.log(`  ${chalk.gray('Organisation:')}  ${chalk.bold.white(creds.orgName)}`)
+    console.log(`  ${chalk.gray('Org ID:')}        ${creds.orgId}`)
+    if (creds.email) {
+      console.log(`  ${chalk.gray('Email:')}         ${creds.email}`)
+    }
+    console.log(`  ${chalk.gray('API Key:')}       ${chalk.green(maskApiKey(creds.apiKey))}`)
+    console.log(`  ${chalk.gray('Config file:')}   ${getCredentialsPath()}\n`)
+  })
+
+// ---------------------------------------------------------------------------
+// axon keys generate
+// ---------------------------------------------------------------------------
+const keysCommand = program.command('keys').description('Manage Axon API keys')
+
+keysCommand
+  .command('generate')
+  .description('Generate a new API key for the current organisation')
+  .action(async () => {
+    const creds = loadCredentials()
+    if (!creds) {
+      console.error(chalk.red('\nError: Not logged in. Please run "axon login" first.\n'))
+      process.exit(1)
+    }
+
+    const spinner = ora(`Rotating API key for ${chalk.bold(creds.orgName)}...`).start()
+    try {
+      const { org, apiKey } = await rotateApiKey(creds.orgId)
+      saveCredentials({
+        ...creds,
+        apiKey,
+      })
+      spinner.succeed(`Generated new API key for ${chalk.bold.green(org.name)}!`)
+      console.log(chalk.bold(`\n🔑 New API Key: ${chalk.yellow(apiKey)}`))
+      console.log(chalk.gray(`Updated credentials file: ${getCredentialsPath()}`))
+      console.log(chalk.yellow('⚠️  Store this key securely. Previous key has been replaced.\n'))
+    } catch (e: any) {
+      spinner.fail(`Failed to generate API key: ${e.message}`)
+      process.exit(1)
+    }
   })
 
 // Only parse if run directly as binary/cli script

@@ -1,15 +1,18 @@
 import { describe, it, expect } from 'vitest'
-import { program, detectGovernanceType } from '../index'
+import { program, detectGovernanceType } from '../index.js'
 
 describe('@axon/cli', () => {
-  it('defines the expected CLI commands', () => {
-    const commandNames = program.commands.map((c) => c.name())
+  it('defines the expected CLI commands including auth', () => {
+    const commandNames = program.commands.map((c: any) => c.name())
     expect(commandNames).toContain('init')
     expect(commandNames).toContain('register')
     expect(commandNames).toContain('status')
     expect(commandNames).toContain('queue')
     expect(commandNames).toContain('history')
     expect(commandNames).toContain('simulate')
+    expect(commandNames).toContain('login')
+    expect(commandNames).toContain('whoami')
+    expect(commandNames).toContain('keys')
   })
 
   it('detectGovernanceType returns a recognized governance type', async () => {

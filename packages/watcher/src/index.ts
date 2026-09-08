@@ -7,6 +7,7 @@ import { NotificationDispatcher } from './notifications'
 import { RegistryWriter } from './registry-writer'
 import { WebhookServer } from './webhook-server'
 import { logger } from './logger'
+export * from './auth'
 
 const rpcUrl = process.env.ETH_RPC_URL
 if (!rpcUrl) throw new Error('ETH_RPC_URL not set')
