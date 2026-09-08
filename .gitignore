@@ -40,3 +40,5 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+*.tsbuildinfo
+axon-design/

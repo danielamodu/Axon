@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 32" fill="none" role="img" aria-labelledby="title">
+  <title>Axon wordmark</title>
+  <g color="currentColor">
+    <path d="M7.5 7.5 16 16l8.5-8.5M7.5 24.5 16 16l8.5 8.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="7.5" cy="7.5" r="2.5" fill="currentColor"/>
+    <circle cx="24.5" cy="7.5" r="2.5" fill="currentColor"/>
+    <circle cx="16" cy="16" r="2.8" fill="currentColor"/>
+    <circle cx="7.5" cy="24.5" r="2.5" fill="currentColor"/>
+    <circle cx="24.5" cy="24.5" r="2.5" fill="currentColor"/>
+    <text x="39" y="22" fill="currentColor" font-family="Arial, Helvetica, sans-serif" font-size="19" font-weight="700" letter-spacing="-1.2">axon</text>
+  </g>
+</svg>
