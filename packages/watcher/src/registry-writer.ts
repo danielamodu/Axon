@@ -24,6 +24,7 @@ export interface RegistryEntry {
   gasUsed: bigint
   executor: Address
   simulationScore: 0 | 1 | 2  // 0=RED 1=YELLOW 2=GREEN
+  keeperHubExecutionId?: string
 }
 
 export class RegistryWriter {
@@ -97,8 +98,11 @@ export class RegistryWriter {
 
     // Encode the mainnet tx hash as bytes32
     const txHashBytes32 = this.hexToBytes32(entry.txHash)
-    // Encode the actionType string as bytes32
-    const actionTypeBytes32 = this.stringToBytes32(entry.actionType)
+    // Encode the actionType string as bytes32, including keeperHubExecutionId if present
+    const rawActionType = entry.keeperHubExecutionId
+      ? `KH:${entry.keeperHubExecutionId}`
+      : entry.actionType
+    const actionTypeBytes32 = this.stringToBytes32(rawActionType)
 
     logger.info(
       { spellAddress: entry.spellAddress, txHash: entry.txHash },

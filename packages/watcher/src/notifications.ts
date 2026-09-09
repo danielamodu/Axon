@@ -23,11 +23,11 @@ export class NotificationDispatcher {
     this.discordWebhookUrl = discordWebhookUrl ?? process.env.DISCORD_WEBHOOK_URL
   }
 
-  async send(payload: NotificationPayload): Promise<void> {
+  async send(payload: NotificationPayload, skipDiscord = false): Promise<void> {
     const formatted = this.formatForLog(payload)
     logger.info(formatted, `[Notification] ${payload.title}`)
 
-    if (this.discordWebhookUrl) {
+    if (this.discordWebhookUrl && !skipDiscord) {
       await this.sendDiscord(payload)
     }
   }
@@ -56,20 +56,38 @@ export class NotificationDispatcher {
     txHash: string
     gasUsed: string
     executedAt: Date
+    keeperHubExecutionId?: string
   }): Promise<void> {
     const etherscanLink = `https://etherscan.io/tx/${opts.txHash}`
-    await this.send({
-      title: '✅ Execution Successful',
-      description: `Spell cast() confirmed on Ethereum mainnet.`,
-      color: 'green',
-      fields: [
-        { name: 'Spell', value: opts.spellAddress, inline: false },
-        { name: 'Tx Hash', value: opts.txHash, inline: false },
-        { name: 'Etherscan', value: etherscanLink, inline: false },
-        { name: 'Gas Used', value: opts.gasUsed, inline: true },
-        { name: 'Executed At', value: opts.executedAt.toISOString(), inline: true },
-      ],
-    })
+    const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+      { name: 'Spell', value: opts.spellAddress, inline: false },
+      { name: 'Tx Hash', value: opts.txHash, inline: false },
+      { name: 'Etherscan', value: etherscanLink, inline: false },
+      { name: 'Gas Used', value: opts.gasUsed, inline: true },
+      { name: 'Executed At', value: opts.executedAt.toISOString(), inline: true },
+    ]
+
+    if (opts.keeperHubExecutionId) {
+      fields.push(
+        { name: 'KeeperHub Execution ID', value: opts.keeperHubExecutionId, inline: true },
+        {
+          name: 'KeeperHub Audit Trail',
+          value: `https://app.keeperhub.com/executions/${opts.keeperHubExecutionId}\nView audit trail on KeeperHub →`,
+          inline: false,
+        }
+      )
+    }
+
+    // Direct Discord call removed as it is now handled by KeeperHub workflow node 8
+    await this.send(
+      {
+        title: '✅ Execution Successful',
+        description: `Spell cast() confirmed on Ethereum mainnet.`,
+        color: 'green',
+        fields,
+      },
+      true // skip direct Discord webhook
+    )
   }
 
   async notifyExecutionFailed(opts: {
@@ -99,15 +117,56 @@ export class NotificationDispatcher {
     error: string
     phase: 'pre-execution'
   }): Promise<void> {
+    // Direct Discord call removed as it is now handled by KeeperHub workflow node 4a
+    await this.send(
+      {
+        title: '⚠️ Simulation Failed at Execution Time',
+        description: `Pre-execution simulation of cast() reverted. Spell held.`,
+        color: 'yellow',
+        fields: [
+          { name: 'Spell', value: opts.spellAddress, inline: false },
+          { name: 'Phase', value: opts.phase, inline: true },
+          { name: 'Error', value: opts.error.slice(0, 500), inline: false },
+        ],
+      },
+      true // skip direct Discord webhook
+    )
+  }
+
+  async notifyPaymentSettled(opts: {
+    spellAddress: string
+    feeUsdc: number
+    txHash?: string
+    settledAt: Date
+  }): Promise<void> {
     await this.send({
-      title: '⚠️ Simulation Failed at Execution Time',
-      description: `Pre-execution simulation of cast() reverted. Spell held.`,
-      color: 'yellow',
+      title: '💳 x402 Execution Payment Settled',
+      description: `Execution payment of ${opts.feeUsdc.toFixed(2)} USDC settled on Base.`,
+      color: 'blue',
       fields: [
         { name: 'Spell', value: opts.spellAddress, inline: false },
-        { name: 'Phase', value: opts.phase, inline: true },
-        { name: 'Error', value: opts.error.slice(0, 500), inline: false },
+        { name: 'Amount', value: `${opts.feeUsdc.toFixed(2)} USDC`, inline: true },
+        ...(opts.txHash
+          ? [{ name: 'Base Tx', value: `https://basescan.org/tx/${opts.txHash}`, inline: false }]
+          : []),
+        { name: 'Settled At', value: opts.settledAt.toISOString(), inline: true },
       ],
+    })
+  }
+
+  async notifyLowBalance(opts: {
+    orgName: string
+    balanceUsdc: number
+  }): Promise<void> {
+    await this.send({
+      title: '⚠️ Low USDC Balance',
+      description: `Axon workspace balance is running low. Please deposit USDC to continue executions.`,
+      color: 'yellow',
+      fields: [
+        { name: 'Organisation', value: opts.orgName, inline: true },
+        { name: 'Current Balance', value: `${opts.balanceUsdc.toFixed(2)} USDC`, inline: true },
+      ],
+      footer: 'Run: axon deposit --amount 10 to top up',
     })
   }
 

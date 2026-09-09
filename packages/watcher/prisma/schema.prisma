@@ -8,14 +8,20 @@ datasource db {
 }
 
 model Organisation {
-  id              String        @id @default(cuid())
-  name            String
-  apiKey          String        @unique @default(cuid())
-  email           String?
-  discordWebhook  String?
-  createdAt       DateTime      @default(now())
-  protocols       Protocol[]
-  executions      SpellRecord[]
+  id                String             @id @default(cuid())
+  name              String
+  apiKey            String             @unique @default(cuid())
+  email             String?
+  passwordHash      String?
+  emailVerified     Boolean            @default(false)
+  discordWebhook    String?
+  usdcBalance       Float              @default(0)
+  totalFeesCharged  Float              @default(0)
+  payoutWallet      String?
+  createdAt         DateTime           @default(now())
+  protocols         Protocol[]
+  executions        SpellRecord[]
+  payments          ExecutionPayment[]
 }
 
 model Protocol {
@@ -28,27 +34,52 @@ model Protocol {
 }
 
 model SpellRecord {
-  id                  String          @id @default(cuid())
-  orgId               String?
-  org                 Organisation?   @relation(fields: [orgId], references: [id])
-  protocolId          String          @default("sky")
-  spellAddress        String          @unique
-  calledAt            DateTime        // when hat() changed to this spell
-  earliestExecution   DateTime        // calledAt + GSM delay
-  latestExecution     DateTime        // calledAt + 30 days
-  officeHoursActive   Boolean
-  nextExecutionWindow DateTime        // first valid office-hours slot
-  calldata            String          // raw calldata hex
-  actions             Json            // parsed action list
-  status              SpellStatus     @default(QUEUED)
-  simulationScore     SimulationScore?
-  conflictStatus      ConflictStatus?
-  conflictDetail      String?
-  executedAt          DateTime?
-  txHash              String?
-  gasUsed             BigInt?
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  id                    String          @id @default(cuid())
+  orgId                 String?
+  org                   Organisation?   @relation(fields: [orgId], references: [id])
+  protocolId            String          @default("sky")
+  spellAddress          String          @unique
+  calledAt              DateTime        // when hat() changed to this spell
+  earliestExecution     DateTime        // calledAt + GSM delay
+  latestExecution       DateTime        // calledAt + 30 days
+  officeHoursActive     Boolean
+  nextExecutionWindow   DateTime        // first valid office-hours slot
+  calldata              String          // raw calldata hex
+  actions               Json            // parsed action list
+  status                SpellStatus     @default(QUEUED)
+  simulationScore       SimulationScore?
+  conflictStatus        ConflictStatus?
+  conflictDetail        String?
+  executedAt            DateTime?
+  txHash                String?
+  gasUsed               BigInt?
+  keeperHubExecutionId  String?
+  keeperHubWorkflowId   String?
+  keeperHubAuditLog     Json?
+  keeperHubStatus       String?
+  x402PaymentTxHash     String?
+  x402AmountUsdc        Float?
+  x402SettledAt         DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+}
+
+model ExecutionPayment {
+  id                String        @id @default(cuid())
+  orgId             String
+  org               Organisation  @relation(fields: [orgId], references: [id])
+  spellAddress      String
+  feeUsdc           Float
+  x402PaymentTxHash String?
+  status            PaymentStatus @default(PENDING)
+  createdAt         DateTime      @default(now())
+  settledAt         DateTime?
+}
+
+enum PaymentStatus {
+  PENDING
+  SETTLED
+  FAILED
 }
 
 enum SpellStatus {

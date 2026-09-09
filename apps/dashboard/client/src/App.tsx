@@ -4,6 +4,7 @@ import NotFound from "@/pages/NotFound";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { Login, Signup } from "./pages/Auth";
 import Home from "./pages/Home";
 import { Dashboard, Docs, ExecutionDetail, NotFoundPage, Privacy, ProtocolDetail, Register, Settings, Terms } from "./pages/ProductPages";
 
@@ -12,6 +13,8 @@ function Router() {
   return (
     <Switch>
       <Route path={"/"} component={Home} />
+      <Route path={"/login"} component={Login} />
+      <Route path={"/signup"} component={Signup} />
       <Route path={"/dashboard"} component={Dashboard} />
       <Route path={"/app"} component={Dashboard} />
       <Route path={"/protocol/sky"} component={ProtocolDetail} />

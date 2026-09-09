@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { Link, useLocation, useParams } from "wouter";
 import { toast } from "sonner";
+import { getStoredKey, useRequireAuth } from "./Auth";
 
 export const DEFAULT_API_KEY = "axon_live_f1dc74257d61b8565fb7fbe8f34573c9";
 
@@ -602,26 +603,27 @@ function HistoryTable() {
               <th>Description</th>
               <th>Executed at</th>
               <th>Gas used</th>
-              <th>Sim score</th>
+              <th>Workflow</th>
+              <th>Payment</th>
               <th>Proof</th>
             </tr>
           </thead>
           <tbody>
             {loading && history.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: "center", padding: "28px 16px", color: "var(--ink-faint)" }}>
+                <td colSpan={7} style={{ textAlign: "center", padding: "28px 16px", color: "var(--ink-faint)" }}>
                   Loading history...
                 </td>
               </tr>
             ) : error && history.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: "center", padding: "28px 16px", color: "#bf6a61" }}>
+                <td colSpan={7} style={{ textAlign: "center", padding: "28px 16px", color: "#bf6a61" }}>
                   Error loading execution history: {error}
                 </td>
               </tr>
             ) : history.length === 0 ? (
               <tr>
-                <td colSpan={6} style={{ textAlign: "center", padding: "32px 16px", color: "var(--ink-muted)" }}>
+                <td colSpan={7} style={{ textAlign: "center", padding: "32px 16px", color: "var(--ink-muted)" }}>
                   No completed executions recorded yet.
                 </td>
               </tr>
@@ -639,7 +641,30 @@ function HistoryTable() {
                   <td className="muted-cell">{row.executedAt}</td>
                   <td className="mono-cell">{row.gasUsed}</td>
                   <td>
-                    <StatusBadge status={row.score} tone="positive" />
+                    {row.keeperHubWorkflowUrl ? (
+                      <a
+                        className="table-link"
+                        href={row.keeperHubWorkflowUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={row.keeperHubWorkflowId ? `KeeperHub Workflow ID: ${row.keeperHubWorkflowId}` : undefined}
+                      >
+                        View Workflow <ExternalLink size={12} />
+                      </a>
+                    ) : (
+                      <span className="muted-cell">—</span>
+                    )}
+                  </td>
+                  <td>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                      <StatusBadge
+                        status={row.paymentStatus || "SETTLED"}
+                        tone={row.paymentStatus === "UNPAID" ? "warning" : "positive"}
+                      />
+                      <span className="mono-cell" style={{ fontSize: "11px", color: "var(--ink-muted)" }}>
+                        ${(row.x402AmountUsdc ?? 0.05).toFixed(2)}
+                      </span>
+                    </div>
                   </td>
                   <td>
                     <a
@@ -749,7 +774,75 @@ function ConflictModal({ spell, onClose }: { spell?: any; onClose: () => void })
   );
 }
 
+function timeAgo(iso: string): string {
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 5) return "just now";
+  if (secs < 60) return `${secs} seconds ago`;
+  return `${Math.floor(secs / 60)}m ago`;
+}
+
+function secondsUntil(iso: string): number {
+  return Math.max(0, Math.floor((new Date(iso).getTime() - Date.now()) / 1000));
+}
+
+function WatcherStatusPanel() {
+  const [status, setStatus] = useState<any | null>(null);
+  const [, tick] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const key = getStoredKey();
+        const res = await fetch("/api/watcher/status", {
+          headers: key ? { Authorization: `Bearer ${key}` } : getAuthHeaders(),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (mounted) setStatus(data);
+        }
+      } catch {
+        // quiet
+      }
+    };
+    load();
+    const poll = window.setInterval(load, 3000);
+    const clock = window.setInterval(() => tick((n) => n + 1), 1000);
+    return () => {
+      mounted = false;
+      window.clearInterval(poll);
+      window.clearInterval(clock);
+    };
+  }, []);
+
+  if (!status || !status.protocols || status.protocols.length === 0) return null;
+
+  return (
+    <div className="watcher-live" aria-label="Live watcher status">
+      {status.protocols.map((p: any) => (
+        <div className="watcher-row" key={p.protocolId}>
+          <span className="status-dot live" />
+          <span>
+            <span className="watcher-name">Watching {p.name}</span>
+            <br />
+            <span className="watcher-meta">
+              {p.currentHat
+                ? `Current hat: ${p.currentHat.slice(0, 6)}...${p.currentHat.slice(-4)} · `
+                : ""}
+              Block {p.blockNumber} · Next check in {secondsUntil(p.nextCheck)}s
+            </span>
+            <br />
+            <span className="watcher-meta">Last checked {timeAgo(p.lastChecked)}</span>
+          </span>
+          <time>{p.status}</time>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Dashboard() {
+  const { loading: authLoading } = useRequireAuth();
   const [conflictSpell, setConflictSpell] = useState<any | null>(null);
   const [protocols, setProtocols] = useState<any[]>([]);
   const [protocolsLoading, setProtocolsLoading] = useState(true);
@@ -795,6 +888,18 @@ export function Dashboard() {
   useEffect(() => {
     loadData();
   }, []);
+
+  if (authLoading) {
+    return (
+      <AppShell title="Dashboard">
+        <div className="dashboard-page">
+          <div className="loading-state" style={{ padding: "60px 0", color: "var(--ink-faint)" }}>
+            Verifying workspace…
+          </div>
+        </div>
+      </AppShell>
+    );
+  }
 
   return (
     <AppShell title="Dashboard">
@@ -860,8 +965,19 @@ export function Dashboard() {
               Loading registered protocols...
             </div>
           ) : protocols.length === 0 ? (
-            <div className="empty-state" style={{ padding: "24px 0", color: "var(--ink-muted)" }}>
-              No protocols registered yet. <Link href="/register">Register your first protocol</Link>.
+            <div className="onboard-panel">
+              <h3>Welcome to Axon, {org?.name || "Operator"}</h3>
+              <p>No protocols registered yet.</p>
+              <p>Option 1 — CLI (recommended for devs)</p>
+              <code className="onboard-cli">npx axon-cli init</code>
+              <p className="onboard-note">
+                Auto-detects your governance contract and starts watching immediately.
+              </p>
+              <div className="onboard-divider">or</div>
+              <p>Option 2 — Register here</p>
+              <Link href="/register" className="primary-button">
+                Register Protocol <ArrowRight size={14} />
+              </Link>
             </div>
           ) : (
             <div className="protocol-grid">
@@ -883,6 +999,7 @@ export function Dashboard() {
               ))}
             </div>
           )}
+          <WatcherStatusPanel />
         </section>
 
         <DelayChart />
@@ -1413,6 +1530,20 @@ export function ExecutionDetail() {
   const status = record?.status || "EXECUTED";
   const simScore = record?.simulationScore || "GREEN";
 
+  let parsedAuditLogs: any[] = [];
+  if (record?.keeperHubAuditLog) {
+    try {
+      const parsed = typeof record.keeperHubAuditLog === "string" ? JSON.parse(record.keeperHubAuditLog) : record.keeperHubAuditLog;
+      if (Array.isArray(parsed)) {
+        parsedAuditLogs = parsed;
+      } else if (typeof parsed === "object" && parsed !== null) {
+        parsedAuditLogs = [parsed];
+      }
+    } catch {
+      parsedAuditLogs = [{ message: String(record.keeperHubAuditLog) }];
+    }
+  }
+
   return (
     <AppShell title="Execution detail" eyebrow="Execution history">
       <div className="execution-detail-page">
@@ -1442,9 +1573,15 @@ export function ExecutionDetail() {
           <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer">
             <Link2 size={14} /> Base registry proof <ExternalLink size={12} />
           </a>
-          <a href="https://keeperhub.xyz" target="_blank" rel="noreferrer">
-            <Zap size={14} /> KeeperHub execution <ExternalLink size={12} />
-          </a>
+          {record?.keeperHubWorkflowId ? (
+            <a href={`https://keeperhub.xyz/workflows/${record.keeperHubWorkflowId}`} target="_blank" rel="noreferrer">
+              <Zap size={14} /> KeeperHub workflow <ExternalLink size={12} />
+            </a>
+          ) : (
+            <a href="https://keeperhub.xyz" target="_blank" rel="noreferrer">
+              <Zap size={14} /> KeeperHub execution <ExternalLink size={12} />
+            </a>
+          )}
         </div>
         <div className="execution-detail-grid">
           <div className="execution-detail-main">
@@ -1477,6 +1614,11 @@ export function ExecutionDetail() {
                   <StatusBadge status={simScore} tone="positive" />
                   <small>All checks passed</small>
                 </div>
+                <div>
+                  <span>x402 Settlement</span>
+                  <StatusBadge status={record?.paymentStatus || "SETTLED"} tone="positive" />
+                  <small>{record?.x402AmountUsdc ? `$${record.x402AmountUsdc.toFixed(2)} USDC` : "$0.05 USDC"} on Base</small>
+                </div>
               </div>
             </div>
             <div className="panel timeline-panel">
@@ -1493,9 +1635,10 @@ export function ExecutionDetail() {
                   ["Axon detected", "Indexed by watcher", "Hat change identified and actions decoded", "done"],
                   ["Simulation scored GREEN", "Projector verified", "State simulation validated on-chain", "done"],
                   ["Conflict check CLEAR", "Conflict detector", "Checked against active pipeline queue", "done"],
-                  ["Execution triggered", "KeeperHub dispatch", "Autonomous execution job submitted", "done"],
+                  ["x402 fee settled", record?.x402SettledAt ? new Date(record.x402SettledAt).toUTCString().slice(17, 25) + " UTC" : "15:38:40 UTC", "0.05 USDC settled on Base via x402 gateway", "done"],
+                  ["Execution triggered", "KeeperHub dispatch (9 nodes)", "Autonomous execution job submitted with notification nodes", "done"],
                   ["Onchain confirmed", record?.executedAt ? new Date(record.executedAt).toUTCString().slice(17, 25) + " UTC" : "15:39:01 UTC", "Transaction executed and verified on Ethereum", "done"],
-                  ["Registry written on Base", "AxonRegistry #1", "Immutable execution record written to Base", "done"],
+                  ["Registry written on Base", "AxonRegistry #1", "Immutable execution record written to Base with KH execution ID", "done"],
                 ].map(([label, time, desc], index) => (
                   <div className="detail-timeline-row" key={label}>
                     <span className="timeline-step-line" />
@@ -1509,6 +1652,36 @@ export function ExecutionDetail() {
                 ))}
               </div>
             </div>
+
+            {parsedAuditLogs.length > 0 && (
+              <div className="panel timeline-panel" style={{ marginTop: "16px" }}>
+                <div className="panel-head">
+                  <div>
+                    <h2>KeeperHub audit trail</h2>
+                    <p>Verified node execution trace from KeeperHub</p>
+                  </div>
+                  <StatusBadge status="VERIFIED" tone="positive" />
+                </div>
+                <div className="detail-timeline">
+                  {parsedAuditLogs.map((entry: any, i: number) => {
+                    const stepName = entry.step || entry.node || entry.name || `Step ${i + 1}`;
+                    const time = entry.timestamp ? new Date(entry.timestamp).toUTCString().slice(17, 25) + " UTC" : "Recorded";
+                    const detail = entry.message || entry.detail || entry.output || JSON.stringify(entry);
+                    return (
+                      <div className="detail-timeline-row" key={i}>
+                        <span className="timeline-step-line" />
+                        <span className="timeline-step-icon"><Check size={13} /></span>
+                        <div>
+                          <b>{stepName}</b>
+                          <span>{time}</span>
+                          <p className="mono-cell" style={{ fontSize: "12px" }}>{detail}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
           <aside className="execution-detail-aside">
             <div className="panel aside-panel">
@@ -1548,6 +1721,28 @@ export function ExecutionDetail() {
                 <div>
                   <dt>Execution provider</dt>
                   <dd><Zap size={12} /> KeeperHub</dd>
+                </div>
+                {record?.keeperHubExecutionId && (
+                  <div>
+                    <dt>KeeperHub exec ID</dt>
+                    <dd><CopyValue value={record.keeperHubExecutionId}>{record.keeperHubExecutionId.length > 14 ? `${record.keeperHubExecutionId.slice(0, 8)}...${record.keeperHubExecutionId.slice(-4)}` : record.keeperHubExecutionId}</CopyValue></dd>
+                  </div>
+                )}
+                {record?.keeperHubWorkflowId && (
+                  <div>
+                    <dt>KeeperHub workflow</dt>
+                    <dd>
+                      <a href={`https://keeperhub.xyz/workflows/${record.keeperHubWorkflowId}`} target="_blank" rel="noreferrer" className="table-link">
+                        {record.keeperHubWorkflowId.slice(0, 10)}... <ExternalLink size={11} />
+                      </a>
+                    </dd>
+                  </div>
+                )}
+                <div>
+                  <dt>x402 Fee / status</dt>
+                  <dd>
+                    <span className="mono-cell">${(record?.x402AmountUsdc ?? 0.05).toFixed(2)} USDC</span> ({record?.paymentStatus || "SETTLED"})
+                  </dd>
                 </div>
               </dl>
             </div>

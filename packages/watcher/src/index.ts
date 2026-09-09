@@ -6,8 +6,10 @@ import { ExecutionEngine } from './executor'
 import { NotificationDispatcher } from './notifications'
 import { RegistryWriter } from './registry-writer'
 import { WebhookServer } from './webhook-server'
+import { startGateway } from '../../x402-gateway/src/index'
 import { logger } from './logger'
 export * from './auth'
+export * from './payment'
 
 const rpcUrl = process.env.ETH_RPC_URL
 if (!rpcUrl) throw new Error('ETH_RPC_URL not set')
@@ -25,6 +27,15 @@ const registryWriter = new RegistryWriter()
 const executor = new ExecutionEngine(client, prisma, notify, undefined, registryWriter)
 const webhookServer = new WebhookServer(registryWriter)
 
+const gatewayPort = Number(process.env.X402_GATEWAY_PORT || 3003)
+let gatewayServer: any = null
+try {
+  gatewayServer = startGateway(gatewayPort)
+  logger.info({ port: gatewayPort }, '🚀 x402 Gateway server listening')
+} catch (err: any) {
+  logger.warn({ err: err.message }, 'Could not start x402 gateway on port 3003 — continuing')
+}
+
 let shuttingDown = false
 
 async function shutdown() {
@@ -41,8 +52,13 @@ async function shutdown() {
   logger.info('Waiting for in-flight execution to finish...')
   await executor.drain()
 
-  // Stop webhook server
+  // Stop webhook server and gateway
   await webhookServer.stop().catch(() => {})
+  if (gatewayServer?.close) {
+    try {
+      gatewayServer.close()
+    } catch {}
+  }
 
   logger.info('All services stopped. Exiting.')
   process.exit(0)

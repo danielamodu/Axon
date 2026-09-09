@@ -99,6 +99,49 @@ program
   .description('Axon — Autonomous Protocol Operations CLI')
   .version('0.1.0')
 
+export function getApiBase(): string {
+  return process.env.AXON_API_BASE_URL ?? 'http://localhost:3000'
+}
+
+export interface RemoteWorkspace {
+  orgId: string
+  orgName: string
+  apiKey: string
+  email?: string
+}
+
+export async function signupViaApi(
+  apiBase: string,
+  body: Record<string, unknown>
+): Promise<RemoteWorkspace | null> {
+  try {
+    const res = await fetch(`${apiBase.replace(/\/$/, '')}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as any
+    if (!data.apiKey) return null
+    return { orgId: data.orgId, orgName: data.orgName, apiKey: data.apiKey, email: body.email as string | undefined }
+  } catch {
+    return null
+  }
+}
+
+export async function meViaApi(apiBase: string, apiKey: string): Promise<RemoteWorkspace | null> {
+  try {
+    const res = await fetch(`${apiBase.replace(/\/$/, '')}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as any
+    return { orgId: data.orgId, orgName: data.orgName, apiKey, email: data.email }
+  } catch {
+    return null
+  }
+}
+
 // ---------------------------------------------------------------------------
 // axon init
 // ---------------------------------------------------------------------------
@@ -192,54 +235,109 @@ program
     console.log(chalk.green(`\n✅ Protocol registered. Axon is now watching ${chalk.bold(answers.name)}!`))
     console.log(chalk.gray(`Config saved to: ${filePath}\n`))
 
-    // Workspace & Auth Flow
+    // Workspace & Auth Flow — converges on the same Organisation + API key as web signup
+    const API_BASE = getApiBase()
+    console.log(chalk.green(`✅ Governance contract detected: ${details.governanceType} on ${answers.network}`))
+    console.log('')
+    console.log('Create your Axon workspace (free) or sign in.')
+    console.log('')
+
     let creds = loadCredentials()
     if (!creds) {
-      console.log(chalk.bold.cyan('🏢 Axon Workspace Setup'))
-      const wsPrompt = await inquirer.prompt([
+      const authChoice = await inquirer.prompt([
         {
-          type: 'confirm',
-          name: 'createWorkspace',
-          message: 'Create your Axon workspace (free)?',
-          default: true,
-        },
-        {
-          type: 'input',
-          name: 'orgName',
-          message: 'Organisation / Team name:',
-          default: `${answers.name} Ops`,
-          when: (a) => a.createWorkspace,
-        },
-        {
-          type: 'input',
-          name: 'email',
-          message: 'Notification email (optional):',
-          when: (a) => a.createWorkspace,
+          type: 'list',
+          name: 'option',
+          message: 'Choose an option:',
+          choices: ['Create new workspace', 'Sign in with existing API key', 'Skip for now'],
         },
       ])
 
-      if (wsPrompt.createWorkspace) {
-        const spinnerOrg = ora('Creating Axon workspace and generating API key...').start()
-        try {
-          const { org, apiKey } = await generateApiKey(wsPrompt.orgName, wsPrompt.email)
-          creds = {
-            orgId: org.id,
-            orgName: org.name,
-            apiKey,
-            email: org.email,
-            createdAt: org.createdAt.toISOString(),
-          }
+      if (authChoice.option === 'Create new workspace') {
+        const ws = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'orgName',
+            message: 'Organisation / Team name:',
+            default: `${answers.name} Ops`,
+            validate: (input) => (input.trim().length > 0 ? true : 'Name cannot be empty'),
+          },
+          {
+            type: 'input',
+            name: 'email',
+            message: 'Email:',
+            validate: (input) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.trim()) ? true : 'Enter a valid email'),
+          },
+          {
+            type: 'password',
+            name: 'password',
+            message: 'Password (min 8 chars):',
+            mask: '*',
+            validate: (input) => (input.length >= 8 ? true : 'Min 8 characters'),
+          },
+        ])
+
+        const spinnerOrg = ora('Creating Axon workspace...').start()
+        const remote = await signupViaApi(API_BASE, {
+          orgName: ws.orgName,
+          email: ws.email,
+          password: ws.password,
+          governanceContract: answers.address,
+          network: answers.network,
+        })
+        if (remote) {
+          creds = { orgId: remote.orgId, orgName: remote.orgName, apiKey: remote.apiKey, email: remote.email, createdAt: new Date().toISOString() }
           saveCredentials(creds)
-          spinnerOrg.succeed(`Workspace created: ${chalk.bold.green(org.name)}`)
-          console.log(chalk.gray(`API Key: ${maskApiKey(apiKey)} (saved to ${getCredentialsPath()})`))
-          console.log(chalk.bold.cyan(`Your dashboard: axon.xyz/dashboard\n`))
-        } catch (err: any) {
-          spinnerOrg.fail(`Failed to auto-generate workspace: ${err.message}`)
+          spinnerOrg.succeed(`Workspace created: ${chalk.bold.green(remote.orgName)}`)
+          console.log(chalk.gray(`API Key: ${maskApiKey(remote.apiKey)} (saved to ${getCredentialsPath()})`))
+          console.log(chalk.bold.cyan(`Dashboard: axon.xyz/dashboard`))
+        } else {
+          // Fallback: API unreachable — register locally, sync later
+          try {
+            const { org, apiKey } = await generateApiKey(ws.orgName, ws.email)
+            creds = { orgId: org.id, orgName: org.name, apiKey, email: org.email, createdAt: org.createdAt.toISOString() }
+            saveCredentials(creds)
+            spinnerOrg.succeed(`Workspace created locally: ${chalk.bold.green(org.name)}`)
+            console.log(chalk.gray(`API Key: ${maskApiKey(apiKey)} (saved to ${getCredentialsPath()})`))
+            console.log(chalk.yellow(`⚠️  Dashboard API unreachable — run axon login to sync to your dashboard.`))
+          } catch (err: any) {
+            spinnerOrg.fail(`Failed to create workspace: ${err.message}`)
+          }
         }
+      } else if (authChoice.option === 'Sign in with existing API key') {
+        const keyAns = await inquirer.prompt([
+          {
+            type: 'password',
+            name: 'apiKey',
+            message: 'Paste your API key:',
+            mask: '*',
+            validate: (input) => (input.trim().length > 10 ? true : 'Please enter a valid API key'),
+          },
+        ])
+        const spinnerKey = ora('Validating API key...').start()
+        const key = keyAns.apiKey.trim()
+        const remote = await meViaApi(API_BASE, key)
+        if (remote) {
+          creds = { orgId: remote.orgId, orgName: remote.orgName, apiKey: key, email: remote.email, createdAt: new Date().toISOString() }
+          saveCredentials(creds)
+          spinnerKey.succeed(`Signed in as ${chalk.bold.green(remote.orgName)}`)
+        } else {
+          const org = await validateApiKey(key)
+          if (!org) {
+            spinnerKey.fail(chalk.red('Invalid API key.'))
+          } else {
+            saveCredentials({ orgId: org.id, orgName: org.name, apiKey: key, email: org.email, createdAt: org.createdAt.toISOString() })
+            spinnerKey.succeed(`Signed in as ${chalk.bold.green(org.name)}`)
+          }
+        }
+      } else {
+        console.log(chalk.yellow('⚠️  Protocol registered locally only. Run axon login to sync to your dashboard.'))
       }
     } else {
       console.log(chalk.gray(`Active workspace: ${creds.orgName} (${maskApiKey(creds.apiKey)})`))
-      console.log(chalk.bold.cyan(`Your dashboard: axon.xyz/dashboard\n`))
+      console.log(chalk.bold.cyan(`Your dashboard: axon.xyz/dashboard`))
+      console.log(chalk.yellow(`Governance execution costs 0.05 USDC per spell.`))
+      console.log(chalk.yellow(`Run: axon deposit --amount 10 to fund your account.\n`))
     }
   })
 
@@ -682,6 +780,143 @@ keysCommand
     } catch (e: any) {
       spinner.fail(`Failed to generate API key: ${e.message}`)
       process.exit(1)
+    }
+  })
+
+// ---------------------------------------------------------------------------
+// axon balance
+// ---------------------------------------------------------------------------
+program
+  .command('balance')
+  .description('Show organisation USDC balance, total fees charged, and recent execution payments')
+  .action(async () => {
+    const creds = loadCredentials()
+    if (!creds) {
+      console.error(chalk.red('\nError: Not logged in. Please run "axon login" first.\n'))
+      process.exit(1)
+    }
+
+    const prisma = new PrismaClient()
+    try {
+      const org = await prisma.organisation.findUnique({
+        where: { id: creds.orgId },
+        include: {
+          payments: {
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          },
+        },
+      })
+
+      if (!org) {
+        console.error(chalk.red(`\nError: Organisation ${creds.orgName} not found in database.\n`))
+        process.exit(1)
+      }
+
+      console.log(chalk.bold.cyan(`\n💳 Axon Account Balance — ${chalk.bold.white(org.name)}`))
+      console.log(chalk.gray(`Workspace ID: ${org.id}`))
+      console.log(chalk.gray(`Payout Wallet: ${org.payoutWallet || 'Not configured'}\n`))
+
+      console.log(`  USDC Balance:       ${chalk.bold.green(`${org.usdcBalance.toFixed(2)} USDC`)}`)
+      console.log(`  Total Fees Charged: ${chalk.bold.yellow(`${org.totalFeesCharged.toFixed(2)} USDC`)}`)
+      console.log(`  Fee Per Execution:  ${chalk.gray('0.05 USDC')}\n`)
+
+      if (org.payments.length > 0) {
+        console.log(chalk.bold('Recent Execution Payments:'))
+        const table = new Table({
+          head: [
+            chalk.cyan('Date'),
+            chalk.cyan('Spell Address'),
+            chalk.cyan('Fee (USDC)'),
+            chalk.cyan('Status'),
+            chalk.cyan('Tx Hash'),
+          ],
+        })
+
+        for (const p of org.payments) {
+          const shortSpell =
+            p.spellAddress.length > 14
+              ? `${p.spellAddress.slice(0, 6)}...${p.spellAddress.slice(-4)}`
+              : p.spellAddress
+          const shortTx = p.x402PaymentTxHash
+            ? `${p.x402PaymentTxHash.slice(0, 8)}...`
+            : '—'
+          table.push([
+            new Date(p.createdAt).toISOString().slice(0, 16).replace('T', ' '),
+            shortSpell,
+            `${p.feeUsdc.toFixed(2)}`,
+            p.status === 'SETTLED' ? chalk.green('SETTLED') : chalk.yellow(p.status),
+            shortTx,
+          ])
+        }
+        console.log(table.toString() + '\n')
+      } else {
+        console.log(chalk.gray('No execution payments recorded yet.\n'))
+      }
+    } catch (err: any) {
+      console.error(chalk.red(`\nError querying balance: ${err.message}\n`))
+      process.exit(1)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
+// ---------------------------------------------------------------------------
+// axon deposit
+// ---------------------------------------------------------------------------
+program
+  .command('deposit')
+  .description('Deposit USDC to your Axon workspace balance')
+  .option('-a, --amount <amount>', 'Amount of USDC to deposit', '10')
+  .action(async (opts) => {
+    const creds = loadCredentials()
+    if (!creds) {
+      console.error(chalk.red('\nError: Not logged in. Please run "axon login" first.\n'))
+      process.exit(1)
+    }
+
+    const amount = parseFloat(opts.amount)
+    if (isNaN(amount) || amount <= 0) {
+      console.error(chalk.red('\nError: Amount must be a positive number.\n'))
+      process.exit(1)
+    }
+
+    const payTo = process.env.X402_PAY_TO || '0x58f6faab055973cdf9e3c05ca0b77613ea0aff9a'
+    console.log(chalk.bold.cyan('\n💳 Axon USDC Deposit'))
+    console.log(chalk.gray(`Please transfer ${chalk.bold.yellow(`${amount} USDC`)} on Base to:`))
+    console.log(chalk.bold.green(`  ${payTo}\n`))
+
+    const answers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'txHash',
+        message: 'Enter the transaction hash of your manual USDC transfer:',
+        validate: (input) => {
+          if (!input || input.trim().length === 0) return 'Transaction hash cannot be empty'
+          if (!input.startsWith('0x') || input.length !== 66)
+            return 'Please enter a valid 66-character tx hash (0x...)'
+          return true
+        },
+      },
+    ])
+
+    const spinner = ora('Verifying transaction and updating balance...').start()
+    const prisma = new PrismaClient()
+    try {
+      await prisma.organisation.update({
+        where: { id: creds.orgId },
+        data: {
+          usdcBalance: { increment: amount },
+        },
+      })
+      spinner.succeed(`Deposit verified: ${answers.txHash.slice(0, 10)}...`)
+      console.log(chalk.green(`\n✅ ${amount} USDC credited to your Axon balance`))
+      console.log(chalk.gray(`Run "axon balance" to view your updated balance.\n`))
+    } catch (err: any) {
+      spinner.fail(`Failed to update balance: ${err.message}`)
+      process.exit(1)
+    } finally {
+      await prisma.$disconnect()
     }
   })
 

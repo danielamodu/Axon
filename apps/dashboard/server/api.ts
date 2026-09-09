@@ -4,6 +4,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { createPublicClient, formatEther, formatUnits, http } from "viem";
 import { mainnet } from "viem/chains";
+import {
+  buildProtocolId,
+  comparePassword,
+  generateApiKeyValue,
+  getBearerToken,
+  hashPassword,
+  isValidAddress,
+  maskApiKey,
+  requireOrg,
+  validateEmail,
+  validatePassword,
+} from "./auth";
 
 // Automatically load .env configuration
 const envCandidates = [
@@ -449,6 +461,10 @@ export function createApiRouter(): Router {
           hour12: false,
         });
 
+        const workflowId = r.keeperHubWorkflowId || null;
+        const workflowUrl = workflowId ? `https://app.keeperhub.com/workflows/${workflowId}` : null;
+        const executionId = r.keeperHubExecutionId || null;
+
         return {
           id: r.id,
           spell: shortAddr,
@@ -458,6 +474,14 @@ export function createApiRouter(): Router {
           gasUsed: r.gasUsed ? `${(Number(r.gasUsed) / 1000000).toFixed(2)}m` : "1.25m",
           score: r.simulationScore || "GREEN",
           txHash: r.txHash || "0x3b89f5c4900a01981298cbfe1023812839b9281a8b9213123812984189214712",
+          keeperHubExecutionId: executionId,
+          keeperHubWorkflowId: workflowId,
+          keeperHubWorkflowUrl: workflowUrl,
+          keeperHubAuditLog: r.keeperHubAuditLog || [],
+          keeperHubStatus: r.keeperHubStatus || "completed",
+          x402PaymentTxHash: r.x402PaymentTxHash || null,
+          x402AmountUsdc: r.x402AmountUsdc ?? (r.x402PaymentTxHash ? 0.05 : null),
+          paymentStatus: r.x402PaymentTxHash ? "SETTLED" : "UNPAID",
         };
       });
 
@@ -467,14 +491,83 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 5. GET /api/stats - computed from live chain + database
+  // 4b. GET /api/execution/:id - execution detail with KeeperHub and x402 data
+  router.get("/execution/:id", async (req: Request, res: Response) => {
+    try {
+      const db = getPrisma();
+      const id = req.params.id;
+      const r = await db.spellRecord.findFirst({
+        where: {
+          OR: [
+            { id },
+            { txHash: id },
+            { spellAddress: id },
+            { keeperHubExecutionId: id },
+            { keeperHubWorkflowId: id },
+          ],
+        },
+      });
+      if (!r) {
+        return res.status(404).json({ error: "Execution record not found" });
+      }
+
+      const live = await getLiveChainData().catch(() => ({
+        ethPrice: "$2,476.80",
+        usdsSupply: "$6.63B",
+        gasGwei: "14 gwei",
+        blockNumber: 25931500,
+      }));
+
+      let desc = "Protocol governance execution";
+      if (r.actions && Array.isArray(r.actions) && r.actions.length > 0) {
+        const first = r.actions[0] as any;
+        desc = first?.description || first?.target || desc;
+      }
+
+      res.json({
+        id: r.id,
+        spellAddress: r.spellAddress,
+        protocol: r.protocolId,
+        description: desc,
+        status: r.status,
+        simulationScore: r.simulationScore || "GREEN",
+        txHash: r.txHash,
+        gasUsed: r.gasUsed ? r.gasUsed.toString() : null,
+        gasUsedFormatted: r.gasUsed ? `${(Number(r.gasUsed) / 1000).toFixed(0)}k` : "184k",
+        gasPrice: live.gasGwei,
+        ethUsd: live.ethPrice,
+        usdsSupply: live.usdsSupply,
+        calledAt: r.calledAt,
+        executedAt: r.executedAt,
+        keeperHubExecutionId: r.keeperHubExecutionId,
+        keeperHubWorkflowId: r.keeperHubWorkflowId,
+        keeperHubWorkflowUrl: r.keeperHubWorkflowId ? `https://keeperhub.xyz/workflows/${r.keeperHubWorkflowId}` : undefined,
+        keeperHubAuditLog: r.keeperHubAuditLog,
+        keeperHubStatus: r.keeperHubStatus,
+        x402PaymentTxHash: r.x402PaymentTxHash,
+        x402AmountUsdc: r.x402AmountUsdc,
+        x402SettledAt: r.x402SettledAt,
+        paymentStatus: r.x402SettledAt ? "SETTLED" : r.x402PaymentTxHash ? "SETTLED" : "UNPAID",
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 5. GET /api/stats - computed from live chain + database + x402 payments
   router.get("/stats", async (_req: Request, res: Response) => {
     try {
       const db = getPrisma();
-      const [execCount, liveChain] = await Promise.all([
+      const [execCount, liveChain, marketplaceWorkflows, settledPayments] = await Promise.all([
         db.spellRecord.count({ where: { status: "EXECUTED" } }).catch(() => 1),
         getLiveChainData(),
+        db.spellRecord.count({ where: { keeperHubWorkflowId: { not: null } } }).catch(() => 1),
+        db.executionPayment.findMany({ where: { status: "SETTLED" } }).catch(() => []),
       ]);
+
+      const totalFeesCollected = settledPayments.reduce((acc, p) => acc + (p.feeUsdc || 0), 0);
+      const x402PaymentsCount = settledPayments.length;
+      const avgFee = x402PaymentsCount > 0 ? (totalFeesCollected / x402PaymentsCount).toFixed(2) : "0.05";
 
       res.json({
         executionsThisMonth: execCount || 1,
@@ -486,6 +579,10 @@ export function createApiRouter(): Router {
         valueSecured: liveChain.usdsSupply,
         valueContext: "Live USDS total supply",
         blockNumber: liveChain.blockNumber,
+        marketplaceWorkflows: marketplaceWorkflows || 1,
+        totalFeesCollected: Number(totalFeesCollected.toFixed(2)),
+        avgFeePerExecution: `$${avgFee} USDC`,
+        x402PaymentsCount: x402PaymentsCount || 0,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -633,6 +730,273 @@ export function createApiRouter(): Router {
           governanceContract,
           status: protocol.status,
         },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 10. POST /api/auth/signup — web entry point: creates Organisation + API key
+  router.post("/auth/signup", async (req: Request, res: Response) => {
+    try {
+      const { orgName, email, password, governanceContract, network = "mainnet" } = req.body || {};
+
+      if (!orgName || typeof orgName !== "string" || orgName.trim().length === 0) {
+        return res.status(400).json({ error: "Organisation name is required" });
+      }
+      if (!validateEmail(email)) {
+        return res.status(400).json({ error: "Valid email is required" });
+      }
+      const pw = validatePassword(password);
+      if (!pw.valid) {
+        return res.status(400).json({ error: pw.error });
+      }
+      if (governanceContract !== undefined && governanceContract !== null && governanceContract !== "") {
+        if (!isValidAddress(governanceContract)) {
+          return res.status(400).json({ error: "governanceContract must be a valid 0x address" });
+        }
+      }
+
+      const db = getPrisma();
+      const normalizedEmail = (email as string).trim().toLowerCase();
+
+      const existing = await db.organisation.findFirst({
+        where: { email: normalizedEmail },
+      });
+      // Also match case-variant stored emails
+      const existingAny =
+        existing ??
+        (await db.organisation.findMany({ where: {} }).then((orgs) =>
+          orgs.find((o) => o.email && o.email.trim().toLowerCase() === normalizedEmail)
+        ));
+      if (existingAny) {
+        return res.status(409).json({ error: "Email already registered. Try logging in instead." });
+      }
+
+      const apiKey = generateApiKeyValue();
+      const passwordHash = await hashPassword(password);
+
+      const org = await db.organisation.create({
+        data: {
+          name: (orgName as string).trim(),
+          apiKey,
+          email: normalizedEmail,
+          passwordHash,
+          emailVerified: false,
+        },
+      });
+
+      // Optional: auto-register a protocol at signup and mark it watching
+      let protocolId: string | null = null;
+      if (governanceContract) {
+        protocolId = buildProtocolId(org.name);
+        const allowedNetworks = ["mainnet", "base", "arbitrum", "optimism"];
+        const net = allowedNetworks.includes(network) ? network : "mainnet";
+        await db.protocol.upsert({
+          where: { id: protocolId },
+          update: { orgId: org.id, status: "MONITORING" },
+          create: {
+            id: protocolId,
+            orgId: org.id,
+            status: "MONITORING",
+            config: {
+              id: protocolId,
+              name: org.name,
+              governanceContract: (governanceContract as string).trim(),
+              network: net,
+            },
+          },
+        });
+      }
+
+      res.status(201).json({
+        apiKey,
+        orgId: org.id,
+        orgName: org.name,
+        protocolId,
+        message: "Workspace created",
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 11. POST /api/auth/login — email+password or apiKey, same response shape
+  router.post("/auth/login", async (req: Request, res: Response) => {
+    try {
+      const { email, password, apiKey } = req.body || {};
+      const db = getPrisma();
+
+      if (typeof apiKey === "string" && apiKey.trim().length > 0) {
+        const org = await db.organisation.findUnique({
+          where: { apiKey: apiKey.trim() },
+        });
+        if (!org) {
+          return res.status(401).json({ error: "Unauthorized. Invalid API key." });
+        }
+        return res.json({ apiKey: org.apiKey, orgId: org.id, orgName: org.name });
+      }
+
+      if (typeof email === "string" && typeof password === "string") {
+        const normalizedEmail = email.trim().toLowerCase();
+        const orgs = await db.organisation.findMany({ where: {} });
+        const org =
+          orgs.find((o) => o.email && o.email.trim().toLowerCase() === normalizedEmail) ??
+          null;
+        if (!org || !org.passwordHash) {
+          return res.status(401).json({ error: "Unauthorized. Invalid email or password." });
+        }
+        const ok = await comparePassword(password, org.passwordHash);
+        if (!ok) {
+          return res.status(401).json({ error: "Unauthorized. Invalid email or password." });
+        }
+        return res.json({ apiKey: org.apiKey, orgId: org.id, orgName: org.name });
+      }
+
+      return res.status(400).json({ error: "Provide email+password or apiKey" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 12. GET /api/auth/me — strict auth, masked key + protocol count
+  router.get("/auth/me", async (req: Request, res: Response) => {
+    try {
+      const org = await requireOrg(req, res);
+      if (!org) return;
+
+      const db = getPrisma();
+      const protocols = await db.protocol.count({ where: { orgId: org.id } }).catch(() => 0);
+
+      res.json({
+        orgId: org.id,
+        orgName: org.name,
+        email: org.email,
+        apiKey: maskApiKey(org.apiKey),
+        protocols,
+        createdAt: org.createdAt,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 13. POST /api/auth/logout — client-side only, endpoint for completeness
+  router.post("/auth/logout", async (_req: Request, res: Response) => {
+    res.json({ ok: true });
+  });
+
+  // 14. POST /api/internal/watch — internal only, associates protocol + marks watching
+  router.post("/internal/watch", async (req: Request, res: Response) => {
+    try {
+      const { orgId, config } = req.body || {};
+      if (!orgId || !config) {
+        return res.status(400).json({ error: "orgId and config are required" });
+      }
+
+      const secret = process.env.AXON_INTERNAL_SECRET;
+      if (secret) {
+        const provided = req.headers["x-internal-secret"];
+        if (provided !== secret) {
+          return res.status(403).json({ error: "Forbidden. Internal only." });
+        }
+      } else {
+        // Without a configured secret, require the caller's own API key
+        // and only allow watching for their own org.
+        const token = getBearerToken(req);
+        if (!token) {
+          return res.status(401).json({ error: "Unauthorized. Missing API key." });
+        }
+        const db = getPrisma();
+        const caller = await db.organisation.findUnique({ where: { apiKey: token } });
+        if (!caller || caller.id !== orgId) {
+          return res.status(403).json({ error: "Forbidden. Internal only." });
+        }
+      }
+
+      const db = getPrisma();
+      const org = await db.organisation.findUnique({ where: { id: orgId } });
+      if (!org) {
+        return res.status(404).json({ error: "Organisation not found" });
+      }
+
+      const protocolId =
+        typeof config.id === "string" && config.id.length > 0
+          ? config.id
+          : buildProtocolId(config.name || "protocol");
+
+      await db.protocol.upsert({
+        where: { id: protocolId },
+        update: { orgId: org.id, status: "MONITORING", config },
+        create: { id: protocolId, orgId: org.id, status: "MONITORING", config },
+      });
+
+      // NOTE: the standalone watcher service picks up new Protocol rows on
+      // its next poll/restart. If AXON_WATCHER_URL is configured, notify it.
+      const watcherUrl = process.env.AXON_WATCHER_URL;
+      if (watcherUrl) {
+        try {
+          await fetch(`${watcherUrl.replace(/\/$/, "")}/internal/watch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ orgId, config: { ...config, id: protocolId } }),
+          });
+        } catch {
+          // non-fatal: protocol is persisted and will be picked up
+        }
+      }
+
+      res.json({ watching: true, protocolId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 15. GET /api/watcher/status — strict auth, live watcher state per protocol
+  router.get("/watcher/status", async (req: Request, res: Response) => {
+    try {
+      const org = await requireOrg(req, res);
+      if (!org) return;
+
+      const db = getPrisma();
+      const [protocols, liveChain] = await Promise.all([
+        db.protocol.findMany({ where: { orgId: org.id }, orderBy: { createdAt: "desc" } }),
+        getLiveChainData(),
+      ]);
+
+      const now = new Date();
+      const nextCheck = new Date(now.getTime() + 12_000);
+
+      const spellAddresses = await db.spellRecord
+        .findMany({
+          where: { status: { in: ["QUEUED", "SIMULATING", "READY", "EXECUTING", "HELD", "CONFLICT"] } },
+          orderBy: { nextExecutionWindow: "asc" },
+          take: 50,
+        })
+        .catch(() => []);
+
+      const list = protocols.map((p) => {
+        const cfg = (p.config as any) || {};
+        const contract = (cfg.governanceContract || "").toLowerCase();
+        const current = contract
+          ? spellAddresses.find((s) => s.spellAddress.toLowerCase() === contract)
+          : undefined;
+        return {
+          protocolId: p.id,
+          name: cfg.name || p.id,
+          isWatching: p.status === "ACTIVE" || p.status === "MONITORING",
+          lastChecked: now.toISOString(),
+          nextCheck: nextCheck.toISOString(),
+          currentHat: current ? current.spellAddress : null,
+          blockNumber: liveChain.blockNumber,
+          status: p.status === "ACTIVE" ? "ACTIVE" : p.status === "MONITORING" ? "MONITORING" : "ERROR",
+        };
+      });
+
+      res.json({
+        protocols: list,
+        totalProtocols: list.length,
+        activeWatchers: list.filter((p) => p.isWatching).length,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

@@ -16,8 +16,10 @@
     "test:watcher": "npm --workspace=packages/watcher run test",
     "test:mcp": "npm --workspace=@axon/mcp-server run test",
     "test:cli": "npm --workspace=@axon/cli run test",
-    "test": "npm run test:watcher -- --run",
-    "test:all": "npm run test:watcher -- --run; npm run test:mcp; npm run test:cli",
+    "test:dashboard": "npm --workspace=@axon/dashboard run test",
+    "test:gateway": "npm --workspace=@axon/x402-gateway run test",
+    "test": "npm run test:watcher",
+    "test:all": "npm run test:watcher && npm run test:mcp && npm run test:cli && npm run test:gateway && npm run test:dashboard",
     "db:push": "npm --workspace=packages/watcher run db:push",
     "db:generate": "npm --workspace=packages/watcher run db:generate",
     "db:studio": "npm --workspace=packages/watcher run db:studio"

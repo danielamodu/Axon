@@ -331,10 +331,33 @@ describe('NotificationDispatcher', () => {
     ).resolves.toBeUndefined()
   })
 
-  it('sends a correctly formatted Discord embed on success notification', async () => {
+  it('sends a correctly formatted Discord embed on failure notification', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => '' } as any)
     const dispatcher = new NotificationDispatcher('https://discord.example.com/webhook')
     // Override global fetch for this test
+    const origFetch = global.fetch
+    ;(global as any).fetch = fetchSpy
+
+    await dispatcher.notifyExecutionFailed({
+      spellAddress: '0xaaaa',
+      error: 'Simulated revert',
+      retryCount: 1,
+    })
+
+    ;(global as any).fetch = origFetch
+
+    expect(fetchSpy).toHaveBeenCalledOnce()
+    const [url, opts] = fetchSpy.mock.calls[0]
+    expect(url).toBe('https://discord.example.com/webhook')
+    const body = JSON.parse(opts.body)
+    expect(body.embeds).toHaveLength(1)
+    expect(body.embeds[0].title).toContain('❌ Execution Failed')
+    expect(body.embeds[0].color).toBe(0xe74c3c)
+  })
+
+  it('skips direct Discord embed on success notification (handled by KeeperHub node 8)', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => '' } as any)
+    const dispatcher = new NotificationDispatcher('https://discord.example.com/webhook')
     const origFetch = global.fetch
     ;(global as any).fetch = fetchSpy
 
@@ -347,14 +370,7 @@ describe('NotificationDispatcher', () => {
 
     ;(global as any).fetch = origFetch
 
-    expect(fetchSpy).toHaveBeenCalledOnce()
-    const [url, opts] = fetchSpy.mock.calls[0]
-    expect(url).toBe('https://discord.example.com/webhook')
-    const body = JSON.parse(opts.body)
-    expect(body.embeds).toHaveLength(1)
-    expect(body.embeds[0].title).toContain('✅ Execution Successful')
-    // Color must be Discord green
-    expect(body.embeds[0].color).toBe(0x2ecc71)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('suppresses Discord delivery failure without throwing', async () => {
