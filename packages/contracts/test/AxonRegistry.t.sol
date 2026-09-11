@@ -26,7 +26,8 @@ contract AxonRegistryTest is Test {
     bytes32 constant TX_HASH_B    = bytes32(uint256(0xDCBA5678));
 
     function setUp() public {
-        registry = new AxonRegistry();
+        // The test contract deploys and therefore is the authorized executor.
+        registry = new AxonRegistry(address(this));
     }
 
     // -------------------------------------------------------------------------
@@ -170,6 +171,53 @@ contract AxonRegistryTest is Test {
         assertEq(rec.executedAt,      ts);
         assertEq(rec.gasUsed,         gas);
         assertEq(rec.simulationScore, score);
+    }
+
+    // -------------------------------------------------------------------------
+    // Executor allowlist
+    // -------------------------------------------------------------------------
+
+    function test_logExecution_revertsForNonExecutor() public {
+        address stranger = address(0xBEEF);
+        vm.prank(stranger);
+        vm.expectRevert(AxonRegistry.NotExecutor.selector);
+        registry.logExecution(
+            SKY_PROTOCOL,
+            SPELL_A,
+            ACTION_TYPE,
+            TX_HASH_A,
+            block.timestamp,
+            150_000,
+            EXECUTOR_ADDR,
+            2
+        );
+        assertEq(registry.recordCount(), 0);
+    }
+
+    function test_setExecutor_rotatesAndRevokesOld() public {
+        address newExecutor = address(0xF00D);
+
+        registry.setExecutor(newExecutor);
+        assertEq(registry.executor(), newExecutor);
+
+        // Old executor (this contract) can no longer write
+        vm.expectRevert(AxonRegistry.NotExecutor.selector);
+        registry.logExecution(
+            SKY_PROTOCOL, SPELL_A, ACTION_TYPE, TX_HASH_A, block.timestamp, 150_000, EXECUTOR_ADDR, 2
+        );
+
+        // New executor can write
+        vm.prank(newExecutor);
+        registry.logExecution(
+            SKY_PROTOCOL, SPELL_A, ACTION_TYPE, TX_HASH_A, block.timestamp, 150_000, EXECUTOR_ADDR, 2
+        );
+        assertEq(registry.recordCount(), 1);
+    }
+
+    function test_setExecutor_revertsForNonExecutor() public {
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(AxonRegistry.NotExecutor.selector);
+        registry.setExecutor(address(0xBEEF));
     }
 
     // -------------------------------------------------------------------------

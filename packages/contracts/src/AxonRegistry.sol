@@ -4,7 +4,10 @@ pragma solidity ^0.8.20;
 /**
  * @title AxonRegistry
  * @notice Immutable onchain ledger for Sky Protocol governance spell executions.
- *         Records are append-only; no owner, no upgradability, no admin keys.
+ *         Records are append-only; no owner, no upgradability.
+ *         Only the designated executor (the Axon backend wallet) may append
+ *         records, so strangers cannot forge execution proofs. The executor
+ *         key can be rotated by the current executor via setExecutor.
  */
 contract AxonRegistry {
     struct ExecutionRecord {
@@ -18,6 +21,9 @@ contract AxonRegistry {
         uint8 simulationScore; // 0=RED 1=YELLOW 2=GREEN
     }
 
+    /// @notice Wallet authorized to append execution records (Axon backend).
+    address public executor;
+
     mapping(uint256 => ExecutionRecord) public records;
     uint256 public recordCount;
 
@@ -28,6 +34,25 @@ contract AxonRegistry {
         uint256 executedAt,
         uint8 simulationScore
     );
+    event ExecutorUpdated(address indexed oldExecutor, address indexed newExecutor);
+
+    error NotExecutor();
+
+    constructor(address initialExecutor) {
+        executor = initialExecutor;
+    }
+
+    modifier onlyExecutor() {
+        if (msg.sender != executor) revert NotExecutor();
+        _;
+    }
+
+    /// @notice Rotate the executor key. Callable only by the current executor.
+    function setExecutor(address newExecutor) external onlyExecutor {
+        address oldExecutor = executor;
+        executor = newExecutor;
+        emit ExecutorUpdated(oldExecutor, newExecutor);
+    }
 
     function logExecution(
         address protocol,
@@ -36,9 +61,9 @@ contract AxonRegistry {
         bytes32 txHash,
         uint256 executedAt,
         uint256 gasUsed,
-        address executor,
+        address executorAddress,
         uint8 simulationScore
-    ) external {
+    ) external onlyExecutor {
         uint256 id = recordCount++;
         records[id] = ExecutionRecord({
             protocol: protocol,
@@ -47,7 +72,7 @@ contract AxonRegistry {
             txHash: txHash,
             executedAt: executedAt,
             gasUsed: gasUsed,
-            executor: executor,
+            executor: executorAddress,
             simulationScore: simulationScore
         });
         emit ExecutionLogged(protocol, spellAddress, txHash, executedAt, simulationScore);
