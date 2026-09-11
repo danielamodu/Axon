@@ -219,6 +219,29 @@ describe('ExecutionEngine', () => {
       )
     })
 
+    it('marks dry-run reports and never writes registry proofs for them', async () => {
+      const spell = createMockSpell()
+      mockPrisma.spellRecord.findUnique.mockResolvedValue(spell)
+      mockClient.readContract.mockResolvedValue(spell.spellAddress)
+      mockClient.simulateContract.mockResolvedValue({ result: undefined })
+
+      const mockRegistryWriter = { log: vi.fn().mockResolvedValue(null) }
+      const dryEngine = new ExecutionEngine(
+        mockClient as unknown as PublicClient,
+        mockPrisma as unknown as PrismaClient,
+        mockNotify,
+        undefined, // no API key → dry-run
+        mockRegistryWriter as unknown as import('../registry-writer').RegistryWriter
+      )
+
+      const report = await dryEngine.executeSpell(spell, 0)
+
+      expect(report.status).toBe('EXECUTED')
+      expect(report.dryRun).toBe(true)
+      // A dry-run must never forge an onchain proof
+      expect(mockRegistryWriter.log).not.toHaveBeenCalled()
+    })
+
     it('transitions to HELD and notifies when pre-flight simulation fails', async () => {
       const spell = createMockSpell()
 

@@ -35,8 +35,10 @@ export interface ExecutionReport {
   gasUsed?: bigint
   error?: string
   retryCount: number
-  keeperHubExecutionId?: string
-  x402PaymentTxHash?: string
+  /** True when no KeeperHub key was configured and the pipeline ran in
+   *  simulation-only mode. Dry runs must never be mistaken for onchain
+   *  execution: no registry proof is written for them. */
+  dryRun: boolean
 }
 
 export class ExecutionEngine {
@@ -171,6 +173,7 @@ export class ExecutionEngine {
         status: 'FAILED',
         error: simResult.error,
         retryCount,
+        dryRun: !this.khClient,
       }
     }
     logger.info({ spellAddress }, '✅ Pre-execution simulation passed')
@@ -189,11 +192,19 @@ export class ExecutionEngine {
         executionId: '',
         status: 'EXECUTED',
         retryCount,
+        dryRun: !this.khClient,
       }
     }
 
     // Step 3: Build and register KeeperHub workflow
     const workflowId = await this.buildAndRegisterWorkflow(spell)
+    const dryRun = !this.khClient || workflowId.startsWith('local-workflow-')
+    if (dryRun) {
+      logger.warn(
+        { spellAddress, workflowId },
+        '🏃 Dry-run mode: pipeline simulates only — no onchain proof will be written'
+      )
+    }
 
     // Store workflow ID on spell record
     await this.prisma.spellRecord.update({
@@ -292,19 +303,27 @@ export class ExecutionEngine {
 
       logger.info({ spellAddress, txHash: result.txHash, gasUsed: result.gasUsed?.toString(), executionId }, '✅ Spell executed successfully')
 
-      // Step 8b: Write to AxonRegistry on Base (including keeperHubExecutionId)
-      const simScore = spell.simulationScore === 'GREEN' ? 2 : spell.simulationScore === 'YELLOW' ? 1 : 0
-      await this.registryWriter.log({
-        protocol: SKY_CHIEF_ADDRESS as Address,
-        spellAddress: spellAddress as Address,
-        actionType: 'GOVERNANCE_CAST',
-        txHash: result.txHash ?? '0x',
-        executedAt: result.executedAt ?? new Date(),
-        gasUsed: result.gasUsed ?? 0n,
-        executor: SKY_CHIEF_ADDRESS as Address,
-        simulationScore: simScore as 0 | 1 | 2,
-        keeperHubExecutionId: executionId,
-      })
+      // Step 8b: Write to AxonRegistry on Base (including keeperHubExecutionId).
+      // Dry runs simulate only — writing their fake hashes would forge proofs.
+      if (dryRun) {
+        logger.warn(
+          { spellAddress },
+          '🏃 Dry-run execution — skipping AxonRegistry write (no onchain proof for simulations)'
+        )
+      } else {
+        const simScore = spell.simulationScore === 'GREEN' ? 2 : spell.simulationScore === 'YELLOW' ? 1 : 0
+        await this.registryWriter.log({
+          protocol: SKY_CHIEF_ADDRESS as Address,
+          spellAddress: spellAddress as Address,
+          actionType: 'GOVERNANCE_CAST',
+          txHash: result.txHash ?? '0x',
+          executedAt: result.executedAt ?? new Date(),
+          gasUsed: result.gasUsed ?? 0n,
+          executor: SKY_CHIEF_ADDRESS as Address,
+          simulationScore: simScore as 0 | 1 | 2,
+          keeperHubExecutionId: executionId,
+        })
+      }
 
       // Step 8c: Publish workflow to marketplace
       await this.publishWorkflow(workflowId, spell)
@@ -317,6 +336,7 @@ export class ExecutionEngine {
         txHash: result.txHash,
         gasUsed: result.gasUsed,
         retryCount,
+        dryRun,
         keeperHubExecutionId: executionId,
         x402PaymentTxHash,
       }
@@ -331,7 +351,7 @@ export class ExecutionEngine {
         const refreshed = await this.prisma.spellRecord.findUnique({ where: { id: spell.id } })
         if (!refreshed || refreshed.status === 'EXECUTED') {
           logger.info({ spellAddress }, 'Spell already executed during retry wait — skipping retry')
-          return { spellAddress, workflowId, executionId, status: 'EXECUTED', retryCount: 1 }
+          return { spellAddress, workflowId, executionId, status: 'EXECUTED', retryCount: 1, dryRun }
         }
 
         // Reset to READY so retry pipeline begins cleanly
@@ -365,6 +385,7 @@ export class ExecutionEngine {
         status: 'FAILED',
         error: errorMsg,
         retryCount: retryCount + 1,
+        dryRun,
       }
     }
   }

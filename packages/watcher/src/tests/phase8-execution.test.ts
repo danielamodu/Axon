@@ -154,16 +154,35 @@ describe('Phase 8 — KeeperHub Execution Depth & Verification', () => {
     )
   })
 
-  it('executeSpell passes keeperHubExecutionId to Base RegistryWriter', async () => {
+  it('executeSpell skips Base RegistryWriter in dry-run mode (no forged proofs)', async () => {
     const engine = new ExecutionEngine(mockPublicClient, mockPrisma, mockNotify, undefined, mockRegistry)
-    await engine.executeSpell(dummySpell)
+    const result = await engine.executeSpell(dummySpell)
 
+    expect(result.status).toBe('EXECUTED')
+    expect(result.dryRun).toBe(true)
+    expect(mockRegistry.log).not.toHaveBeenCalled()
+  })
+
+  it('executeSpell passes keeperHubExecutionId to Base RegistryWriter in live mode', async () => {    const mockKhClient: any = {
+      createWorkflow: vi.fn().mockResolvedValue({ id: 'wf-live' }),
+      rawRequest: vi.fn().mockResolvedValue({ ok: true, result: { valid: true } }),
+      executeWorkflow: vi.fn().mockResolvedValue({ executionId: 'kh-exec-live-1' }),
+      getExecutionStatus: vi.fn().mockResolvedValue({ status: 'success' }),
+      getExecutionLogs: vi.fn().mockResolvedValue({
+        data: [{ output: { transactionHash: '0xlive-tx-hash', gasUsed: '21000' } }],
+      }),
+    }
+    const engine = new ExecutionEngine(mockPublicClient, mockPrisma, mockNotify, mockKhClient, mockRegistry)
+    const result = await engine.executeSpell(dummySpell)
+
+    expect(result.status).toBe('EXECUTED')
+    expect(result.dryRun).toBe(false)
     expect(mockRegistry.log).toHaveBeenCalledWith(
       expect.objectContaining({
         keeperHubExecutionId: expect.stringMatching(/^(kh-exec-|gateway-exec-|local-exec-)/),
       })
     )
-  })
+  }, 30000)
 
   it('RegistryWriter logs no-op when unconfigured or invalid address', async () => {
     const rw = new RegistryWriter(undefined, undefined, undefined)
