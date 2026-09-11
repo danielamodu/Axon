@@ -33,10 +33,10 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  LogOut,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
-  Users,
   WalletCards,
   X,
   Zap,
@@ -59,9 +59,22 @@ export function getAuthHeaders(): HeadersInit {
   };
 }
 
+/** Clears the workspace session on client and server, then lands on /login. */
+export async function signOut() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // server logout is best-effort; local session clears regardless
+  }
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem("axon_api_key");
+    window.localStorage.removeItem("axon_org_name");
+    window.location.href = "/login";
+  }
+}
+
 const appNav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/protocol/sky", label: "Sky Protocol", icon: Network },
   { href: "/register", label: "Register", icon: Plus },
 ];
 
@@ -114,6 +127,10 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
   const [mobileOpen, setMobileOpen] = useState(false);
   const [blockNumber, setBlockNumber] = useState<number>(25931500);
   const [org, setOrg] = useState<{ id: string; name: string; email?: string } | null>(null);
+  // Every page inside the app shell requires a signed-in workspace.
+  // Public pages (/, /login, /signup, /docs, /privacy, /terms) never mount this shell.
+  const { loading: authLoading } = useRequireAuth();
+  const [navProtocols, setNavProtocols] = useState<any[]>([]);
 
   // Poll Ethereum block number every 12 seconds
   useEffect(() => {
@@ -158,6 +175,21 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
     fetchOrg();
   }, []);
 
+  // Fetch workspace protocols for dynamic sidebar links.
+  // Refetches on navigation so CLI-registered protocols appear without reload.
+  useEffect(() => {
+    let mounted = true;
+    fetch("/api/protocols", { headers: getAuthHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (mounted) setNavProtocols(data?.protocols || []);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [location]);
+
   const orgInitials = org?.name
     ? org.name
         .split(" ")
@@ -169,6 +201,16 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
 
   return (
     <div className="app-shell">
+      {authLoading ? (
+        <div className="app-main">
+          <div className="app-content">
+            <div className="loading-state" style={{ padding: "60px 0", color: "var(--ink-faint)" }}>
+              Verifying workspace…
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
       <aside className={`app-sidebar ${mobileOpen ? "is-open" : ""}`}>
         <div className="app-sidebar-top">
           <Link href="/" className="app-brand">
@@ -195,7 +237,18 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
             >
               <Icon size={16} />
               <span>{label}</span>
-              {label === "Sky Protocol" && <span className="nav-live-dot" />}
+            </Link>
+          ))}
+          {navProtocols.map((p) => (
+            <Link
+              key={p.id}
+              href={`/protocol/${p.id}`}
+              className={`app-nav-link ${location === `/protocol/${p.id}` ? "active" : ""}`}
+              onClick={() => setMobileOpen(false)}
+            >
+              <Network size={16} />
+              <span>{p.name}</span>
+              {p.active && <span className="nav-live-dot" />}
             </Link>
           ))}
           <span className="nav-label nav-label-spaced">Observe</span>
@@ -222,6 +275,9 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
           <Link href="/settings" className={`sidebar-settings ${location === "/settings" ? "active" : ""}`}>
             <Settings2 size={15} /> Settings
           </Link>
+          <button className="sidebar-settings sidebar-logout" onClick={() => signOut()} aria-label="Sign out of workspace">
+            <LogOut size={15} /> Sign out
+          </button>
         </div>
       </aside>
       {mobileOpen && <button className="app-overlay" onClick={() => setMobileOpen(false)} aria-label="Close navigation overlay" />}
@@ -250,6 +306,8 @@ function AppShell({ children, title, eyebrow = "Protocol operations" }: { childr
         </header>
         <div className="app-content">{children}</div>
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -281,6 +339,7 @@ function StatCard({ label, value, meta, icon: Icon, tone = "neutral" }: { label:
 }
 
 function ProtocolCard({
+  id,
   name,
   network,
   status,
@@ -293,6 +352,7 @@ function ProtocolCard({
   lastExecution,
   lastExecutionAddr,
 }: {
+  id: string;
   name: string;
   network: string;
   status: string;
@@ -317,9 +377,9 @@ function ProtocolCard({
       {active ? (
         <>
           <div className="protocol-stats">
-            <span><small>Total executions</small><b>{executions || "1"}</b></span>
-            <span><small>Avg delay</small><b>{delay || "4m 12s"}</b></span>
-            <span><small>Reliability</small><b>{reliability || "98.7%"}</b></span>
+            <span><small>Total executions</small><b>{executions ?? "0"}</b></span>
+            <span><small>Avg delay</small><b>{delay ?? "—"}</b></span>
+            <span><small>Reliability</small><b>{reliability ?? "—"}</b></span>
           </div>
           <div className="protocol-last">
             <span>
@@ -333,11 +393,11 @@ function ProtocolCard({
             <span>Confirmed</span>
           </div>
           <div className="reliability-bar">
-            <span style={{ width: reliability || "98.7%" }} />
+            <span style={{ width: reliability && reliability !== "—" ? reliability : "0%" }} />
           </div>
           <div className="protocol-card-foot">
-            <span>Next execution <b>{next || "In 18m"}</b></span>
-            <Link href="/protocol/sky">View details <ArrowRight size={14} /></Link>
+            <span>Next execution <b>{next || "—"}</b></span>
+            <Link href={`/protocol/${id}`}>View details <ArrowRight size={14} /></Link>
           </div>
         </>
       ) : (
@@ -358,21 +418,56 @@ function ProtocolCard({
   );
 }
 
-function DelayChart() {
-  // Hardcoded historical delay chart dataset as specified:
-  // Before Axon (17 bars): [28, 14, 6, 31, 8, 19, 3, 22, 11, 16, 25, 7, 13, 29, 4, 17, 9]
-  // Axon activated marker placed after bar 17
-  // After Axon (3 bars): [0.1, 0.2, 0.1]
-  const beforeAxon = [28, 14, 6, 31, 8, 19, 3, 22, 11, 16, 25, 7, 13, 29, 4, 17, 9];
-  const afterAxon = [0.1, 0.2, 0.1];
-  const bars = [...beforeAxon, ...afterAxon];
-  const maxDelay = 32;
+const HISTORICAL_DELAYS = [28, 14, 6, 31, 8, 19, 3, 22, 11, 16, 25, 7, 13, 29, 4, 17, 9];
+const DEMO_AFTER_AXON = [0.1, 0.2, 0.1];
+const MAX_DELAY_BARS = 20;
+
+function DelayChart({ title = "Execution delay history", protocolId }: { title?: string; protocolId?: string } = {}) {
+  const [live, setLive] = useState<{ value: number; label: string }[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    const url = protocolId ? `/api/delays?protocolId=${encodeURIComponent(protocolId)}` : "/api/delays";
+    fetch(url, { headers: getAuthHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (mounted && Array.isArray(data?.delays)) {
+          setLive(
+            data.delays.map((d: any) => ({
+              value: Number(d.delayHours) || 0,
+              label:
+                d.spellAddress && d.spellAddress.length > 12
+                  ? `${d.spellAddress.slice(0, 6)}...${d.spellAddress.slice(-4)}`
+                  : String(d.spellAddress || ""),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [protocolId]);
+
+  // Live bars fill from the right (after "Axon activated"); history backfills
+  // the rest. With zero live executions the full historical illustration shows.
+  const liveBars = live.slice(-MAX_DELAY_BARS);
+  const histTake = liveBars.length === 0 ? HISTORICAL_DELAYS.length : Math.max(0, MAX_DELAY_BARS - liveBars.length);
+  const bars = [
+    ...HISTORICAL_DELAYS.slice(HISTORICAL_DELAYS.length - histTake).map((value) => ({ value, label: "", live: false })),
+    ...liveBars.map((b) => ({ ...b, live: true })),
+    ...(liveBars.length === 0 ? DEMO_AFTER_AXON.map((value) => ({ value, label: "", live: false })) : []),
+  ];
+  const historyCount = bars.length - liveBars.length - (liveBars.length === 0 ? DEMO_AFTER_AXON.length : 0);
+  const dividerLeft = bars.length > 0 ? historyCount / bars.length : 0;
+  const maxDelay = Math.max(32, ...bars.map((b) => b.value));
+  const fmtAxis = (h: number) => `${Math.round(h)}h`;
 
   return (
     <div className="panel chart-panel">
       <div className="panel-head">
         <div>
-          <h2>Sky Protocol — Execution delay history</h2>
+          <h2>{title}</h2>
           <p>Hours between governance passing and on-chain execution</p>
         </div>
         <button className="icon-button" aria-label="Chart options">
@@ -381,8 +476,8 @@ function DelayChart() {
       </div>
       <div className="chart-wrap">
         <div className="chart-y-labels">
-          <span>32h</span>
-          <span>16h</span>
+          <span>{fmtAxis(maxDelay)}</span>
+          <span>{fmtAxis(maxDelay / 2)}</span>
           <span>0h</span>
         </div>
         <div className="chart-area">
@@ -390,17 +485,19 @@ function DelayChart() {
           <div className="chart-grid-line line-2" />
           <div className="chart-grid-line line-3" />
           <div className="chart-bars">
-            {bars.map((height, index) => {
-              const isAfter = index >= 17;
+            {bars.map((bar, index) => {
+              const height = bar.value;
+              const isAfter = index >= historyCount;
               const heightPct = Math.max((height / maxDelay) * 100, 3.5);
               const tone = height > 24 ? "danger" : height > 8 ? "caution" : "good";
-              const tooltip = height < 1 ? `${Math.round(height * 60)} minutes` : `${height} hours`;
+              const base = height < 1 ? `${Math.round(height * 60)} minutes` : `${height.toFixed(1)} hours`;
+              const tooltip = bar.label ? `${base} · ${bar.label}` : base;
 
               return (
                 <div key={index} className={`chart-bar-group ${isAfter ? "after-axon" : ""}`}>
                   <span
                     className={`chart-bar ${tone}`}
-                    style={{ height: `${heightPct}%` }}
+                    style={{ height: `${heightPct}%`, opacity: bar.live || liveBars.length === 0 ? 1 : 0.85 }}
                     title={tooltip}
                   />
                   <small>{index + 1}</small>
@@ -408,7 +505,7 @@ function DelayChart() {
               );
             })}
           </div>
-          <div className="chart-divider" style={{ left: "calc(100% * 0.85)" }}>
+          <div className="chart-divider" style={{ left: `calc(100% * ${dividerLeft})` }}>
             <span>Axon activated</span>
           </div>
         </div>
@@ -417,7 +514,9 @@ function DelayChart() {
         <span><i className="legend-swatch good" />Under 8h</span>
         <span><i className="legend-swatch caution" />8–24h</span>
         <span><i className="legend-swatch danger" />Over 24h</span>
-        <span className="chart-period">Last 30 days</span>
+        <span className="chart-period">
+          {liveBars.length > 0 ? `${liveBars.length} live execution${liveBars.length === 1 ? "" : "s"}` : "Historical illustration"}
+        </span>
       </div>
     </div>
   );
@@ -842,19 +941,18 @@ function WatcherStatusPanel() {
 }
 
 export function Dashboard() {
-  const { loading: authLoading } = useRequireAuth();
   const [conflictSpell, setConflictSpell] = useState<any | null>(null);
   const [protocols, setProtocols] = useState<any[]>([]);
   const [protocolsLoading, setProtocolsLoading] = useState(true);
   const [org, setOrg] = useState<any>(null);
   const [stats, setStats] = useState<any>({
-    executionsThisMonth: "1",
-    executionsDelta: "↑ 18% from last month",
-    averageDelay: "4m 12s",
-    delayDelta: "↓ 96% since Axon",
-    reliability: "98.7%",
-    reliabilityContext: "Last 30 days · Sky",
-    valueSecured: "$6.63B",
+    executionsThisMonth: "0",
+    executionsDelta: "—",
+    averageDelay: "—",
+    delayDelta: "—",
+    reliability: "—",
+    reliabilityContext: "No executions yet",
+    valueSecured: "—",
     valueContext: "Live USDS total supply",
   });
 
@@ -887,19 +985,11 @@ export function Dashboard() {
 
   useEffect(() => {
     loadData();
+    // Re-poll so protocols registered via `axon init` (CLI) appear
+    // on the dashboard without a manual refresh.
+    const interval = window.setInterval(loadData, 10000);
+    return () => window.clearInterval(interval);
   }, []);
-
-  if (authLoading) {
-    return (
-      <AppShell title="Dashboard">
-        <div className="dashboard-page">
-          <div className="loading-state" style={{ padding: "60px 0", color: "var(--ink-faint)" }}>
-            Verifying workspace…
-          </div>
-        </div>
-      </AppShell>
-    );
-  }
 
   return (
     <AppShell title="Dashboard">
@@ -921,29 +1011,29 @@ export function Dashboard() {
         <div className="dashboard-stats">
           <StatCard
             label="Executions this month"
-            value={String(stats.executionsThisMonth || "1")}
-            meta={stats.executionsDelta || "↑ 18% from last month"}
+            value={String(stats.executionsThisMonth ?? "0")}
+            meta={stats.executionsDelta ?? "—"}
             icon={Zap}
             tone="positive"
           />
           <StatCard
             label="Average execution delay"
-            value={stats.averageDelay || "4m 12s"}
-            meta={stats.delayDelta || "↓ 96% since Axon"}
+            value={stats.averageDelay ?? "—"}
+            meta={stats.delayDelta ?? "—"}
             icon={Clock3}
             tone="info"
           />
           <StatCard
             label="Reliability"
-            value={stats.reliability || "98.7%"}
-            meta={stats.reliabilityContext || "Last 30 days · Sky"}
+            value={stats.reliability ?? "—"}
+            meta={stats.reliabilityContext ?? "No executions yet"}
             icon={Gauge}
             tone="positive"
           />
           <StatCard
             label="Value secured"
-            value={stats.valueSecured || "$6.63B"}
-            meta={stats.valueContext || "Live USDS total supply"}
+            value={stats.valueSecured ?? "—"}
+            meta={stats.valueContext ?? "Live USDS total supply"}
             icon={ShieldCheck}
             tone="neutral"
           />
@@ -984,6 +1074,7 @@ export function Dashboard() {
               {protocols.map((p) => (
                 <ProtocolCard
                   key={p.id}
+                  id={p.id}
                   name={p.name}
                   network={p.network}
                   status={p.status}
@@ -1035,10 +1126,10 @@ function Pipeline({ current = 2, active = false }: { current?: number; active?: 
 
 function ProjectionPanel() {
   const [projection, setProjection] = useState<any>({
-    ethGas: "8.4 gwei",
-    usdsSupply: "$6.63B",
-    vatHeadroom: "$3.74B",
-    ethUsdPrice: "$2,476.80",
+    ethGas: "—",
+    usdsSupply: "—",
+    vatHeadroom: "—",
+    ethUsdPrice: "—",
   });
 
   useEffect(() => {
@@ -1090,45 +1181,95 @@ function ProjectionPanel() {
 }
 
 export function ProtocolDetail() {
+  const params = useParams();
+  const id = (params as any)?.id as string | undefined;
   const [queue, setQueue] = useState<any[]>([]);
+  const [protocol, setProtocol] = useState<any | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [stats, setStats] = useState<any>({
-    executionsThisMonth: "1",
-    averageDelay: "4m 12s",
-    reliability: "98.7%",
-    valueSecured: "$6.63B",
+    executionsThisMonth: "0",
+    averageDelay: "—",
+    reliability: "—",
+    valueSecured: "—",
   });
 
   useEffect(() => {
+    if (!id) {
+      setNotFound(true);
+      return;
+    }
+    setNotFound(false);
     Promise.all([
+      fetch(`/api/protocols/${encodeURIComponent(id)}`, { headers: getAuthHeaders() }).then((r) => {
+        if (r.status === 404) {
+          setNotFound(true);
+          return null;
+        }
+        return r.ok ? r.json() : null;
+      }),
       fetch("/api/queue", { headers: getAuthHeaders() }).then((r) => (r.ok ? r.json() : null)),
-      fetch("/api/stats", { headers: getAuthHeaders() }).then((r) => (r.ok ? r.json() : null)),
     ])
-      .then(([queueData, statsData]) => {
+      .then(([protoData, queueData]) => {
+        if (protoData) {
+          setProtocol(protoData);
+          setStats((s: any) => ({
+            ...s,
+            executionsThisMonth: String(protoData.executions ?? "0"),
+            averageDelay: protoData.averageDelay ?? "—",
+            reliability: protoData.reliability ?? "—",
+            valueSecured: protoData.valueSecured ?? "—",
+          }));
+        }
         if (queueData?.queue) setQueue(queueData.queue);
-        if (statsData) setStats(statsData);
       })
       .catch(() => {});
-  }, []);
+  }, [id]);
+
+  if (notFound) {
+    return (
+      <AppShell title="Protocol" eyebrow="Protocols">
+        <div className="detail-page">
+          <Link href="/dashboard" className="back-link">
+            <ArrowLeft size={15} /> Back to dashboard
+          </Link>
+          <PageIntro
+            eyebrow="Not in this workspace"
+            title="Protocol not found"
+            description="No protocol with this ID is registered under your workspace. Register it to start monitoring."
+            action={
+              <Link href="/register" className="primary-button">
+                Register protocol <ArrowRight size={14} />
+              </Link>
+            }
+          />
+        </div>
+      </AppShell>
+    );
+  }
 
   const activeSpell = queue.length > 0 ? queue[0] : null;
+  const name = protocol?.name || "Protocol";
+  const contract = protocol?.governanceContract || "";
+  const shortContract =
+    contract.length > 12 ? `${contract.slice(0, 6)}...${contract.slice(-4)}` : contract || "—";
 
   return (
-    <AppShell title="Sky Protocol" eyebrow="Protocols">
+    <AppShell title={name} eyebrow="Protocols">
       <div className="detail-page">
         <Link href="/dashboard" className="back-link">
           <ArrowLeft size={15} /> Back to dashboard
         </Link>
         <PageIntro
-          eyebrow="Active protocol · Ethereum mainnet"
-          title="Sky Protocol"
-          description="Governance execution and protocol operations for the Sky ecosystem."
-          action={<StatusBadge status="ACTIVE" tone="positive" />}
+          eyebrow={`${protocol?.status ? `${protocol.status} · ` : ""}${protocol?.network || "Protocol detail"}`}
+          title={name}
+          description={`Governance execution and protocol operations for ${name}.`}
+          action={protocol ? <StatusBadge status={protocol.status} tone={protocol.statusTone} /> : undefined}
         />
         <div className="detail-stats">
-          <StatCard label="Total executions" value={String(stats.executionsThisMonth || "1")} meta="Since Aug 12, 2026" icon={Zap} tone="positive" />
-          <StatCard label="Average delay" value={stats.averageDelay || "4m 12s"} meta="Governance → chain" icon={Clock3} tone="info" />
-          <StatCard label="Reliability" value={stats.reliability || "98.7%"} meta="Last 30 days" icon={Gauge} tone="positive" />
-          <StatCard label="Value secured" value={stats.valueSecured || "$6.63B"} meta="Current protocol value" icon={ShieldCheck} tone="neutral" />
+          <StatCard label="Total executions" value={String(stats.executionsThisMonth ?? "0")} meta="All time" icon={Zap} tone="positive" />
+          <StatCard label="Average delay" value={stats.averageDelay ?? "—"} meta="Governance → chain" icon={Clock3} tone="info" />
+          <StatCard label="Reliability" value={stats.reliability ?? "—"} meta="Completed vs failed" icon={Gauge} tone="positive" />
+          <StatCard label="Value secured" value={stats.valueSecured ?? "—"} meta="Live USDS total supply" icon={ShieldCheck} tone="neutral" />
         </div>
         <div className="detail-grid">
           <div className="detail-main">
@@ -1156,6 +1297,7 @@ export function ProtocolDetail() {
               <Pipeline active={!!activeSpell} current={2} />
             </div>
             <ProjectionPanel />
+            <DelayChart title={`${name} — Execution delay history`} protocolId={id} />
             <HistoryTable />
           </div>
           <aside className="detail-aside">
@@ -1187,11 +1329,11 @@ export function ProtocolDetail() {
               <dl className="config-list">
                 <div>
                   <dt>Governance contract</dt>
-                  <dd><CopyValue value="0x0a3f6849f78076aefaDf113F5BED87720274dDC0">0x0a...dDC0</CopyValue></dd>
+                  <dd>{contract ? <CopyValue value={contract}>{shortContract}</CopyValue> : "—"}</dd>
                 </div>
                 <div>
-                  <dt>Operation types</dt>
-                  <dd>Governance execution<br />Parameter updates</dd>
+                  <dt>Governance type</dt>
+                  <dd>{protocol?.governanceType || "—"}</dd>
                 </div>
                 <div>
                   <dt>Execution provider</dt>
@@ -1314,7 +1456,7 @@ export function Register() {
                 Protocol name
                 <input
                   required
-                  placeholder="e.g. Sky Protocol"
+                  placeholder="e.g. My Protocol"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
@@ -1519,16 +1661,16 @@ export function ExecutionDetail() {
     );
   }
 
-  const spellAddress = record?.spellAddress || txHashParam || "0x900c952c676595DdB392FA6349aD5f0674a67Eeb";
+  const spellAddress = record?.spellAddress || txHashParam || "—";
   const shortSpell = spellAddress.length > 12 ? `${spellAddress.slice(0, 6)}...${spellAddress.slice(-4)}` : spellAddress;
-  const description = record?.description || "2024-09-05 MakerDAO Executive Spell";
-  const txHash = record?.txHash || "0x3b89f5c4900a01981298cbfe1023812839b9281a8b9213123812984189214712";
-  const gasUsed = record?.gasUsedFormatted || "1.25m";
-  const gasPrice = record?.gasPrice || "8.4 gwei";
-  const ethUsd = record?.ethUsd || "$2,476.80";
-  const usdsSupply = record?.usdsSupply || "$6.63B";
-  const status = record?.status || "EXECUTED";
-  const simScore = record?.simulationScore || "GREEN";
+  const description = record?.description || "Protocol governance execution";
+  const txHash = record?.txHash || null;
+  const gasUsed = record?.gasUsedFormatted || record?.gasUsed || "—";
+  const gasPrice = record?.gasPrice || "—";
+  const ethUsd = record?.ethUsd || "—";
+  const usdsSupply = record?.usdsSupply || "—";
+  const status = record?.status || "—";
+  const simScore = record?.simulationScore || "—";
 
   let parsedAuditLogs: any[] = [];
   if (record?.keeperHubAuditLog) {
@@ -1560,9 +1702,11 @@ export function ExecutionDetail() {
             </div>
           </div>
           <div className="head-actions">
-            <a href={`https://etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" className="secondary-button">
-              Open on Etherscan <ExternalLink size={14} />
-            </a>
+            {txHash ? (
+              <a href={`https://etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" className="secondary-button">
+                Open on Etherscan <ExternalLink size={14} />
+              </a>
+            ) : null}
             <button className="icon-button" aria-label="Execution options"><MoreHorizontal size={18} /></button>
           </div>
         </div>
@@ -1570,9 +1714,11 @@ export function ExecutionDetail() {
           <a href={`https://etherscan.io/address/${spellAddress}`} target="_blank" rel="noreferrer">
             <Link2 size={14} /> Ethereum contract <ExternalLink size={12} />
           </a>
-          <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer">
-            <Link2 size={14} /> Base registry proof <ExternalLink size={12} />
-          </a>
+          {txHash ? (
+            <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer">
+              <Link2 size={14} /> Base registry proof <ExternalLink size={12} />
+            </a>
+          ) : null}
           {record?.keeperHubWorkflowId ? (
             <a href={`https://keeperhub.xyz/workflows/${record.keeperHubWorkflowId}`} target="_blank" rel="noreferrer">
               <Zap size={14} /> KeeperHub workflow <ExternalLink size={12} />
@@ -1716,7 +1862,7 @@ export function ExecutionDetail() {
                 </div>
                 <div>
                   <dt>Protocol</dt>
-                  <dd>Sky Protocol</dd>
+                  <dd>{record?.protocol || "—"}</dd>
                 </div>
                 <div>
                   <dt>Execution provider</dt>
@@ -1962,21 +2108,25 @@ export function Docs() {
 export function Settings() {
   const read = (key: string, fallback: string) => (typeof window === "undefined" ? fallback : window.localStorage.getItem(key) ?? fallback);
   const [saved, setSaved] = useState(false);
-  const [workspaceName, setWorkspaceName] = useState(() => read("axon.workspaceName", "Sky Ecosystem"));
+  const [copied, setCopied] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState(() => read("axon.workspaceName", ""));
   const [network, setNetwork] = useState(() => read("axon.defaultNetwork", "ethereum"));
   const [notifications, setNotifications] = useState(() => read("axon.conflictAlerts", "true") === "true");
   const [digest, setDigest] = useState(() => read("axon.weeklyDigest", "false") === "true");
-  const [apiKey, setApiKey] = useState(() => read("axon_api_key", DEFAULT_API_KEY));
+  const [apiKey, setApiKey] = useState(() => read("axon_api_key", ""));
   const [org, setOrg] = useState<any>(null);
 
   useEffect(() => {
-    fetch("/api/auth/verify", { headers: getAuthHeaders() })
+    const key = getStoredKey();
+    if (!key) return;
+    fetch("/api/auth/me", { headers: { Authorization: `Bearer ${key}` } })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d?.org) {
-          setOrg(d.org);
+        if (d) {
+          setOrg(d);
           if (!window.localStorage.getItem("axon.workspaceName")) {
-            setWorkspaceName(d.org.name);
+            setWorkspaceName(d.orgName);
           }
         }
       })
@@ -1988,34 +2138,63 @@ export function Settings() {
     window.localStorage.setItem("axon.defaultNetwork", network);
     window.localStorage.setItem("axon.conflictAlerts", String(notifications));
     window.localStorage.setItem("axon.weeklyDigest", String(digest));
-    window.localStorage.setItem("axon_api_key", apiKey.trim());
+    if (apiKey.trim()) {
+      window.localStorage.setItem("axon_api_key", apiKey.trim());
+    }
     setSaved(true);
-    toast.success("Settings saved", { description: "Your Axon workspace credentials and preferences are persisted." });
+    toast.success("Settings saved", { description: "Workspace preferences are persisted in this browser." });
     window.setTimeout(() => setSaved(false), 2200);
   };
 
+  const copyKey = () => {
+    const full = getStoredKey() || "";
+    if (!full) return;
+    navigator.clipboard?.writeText(full);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    await signOut();
+  };
+
+  const initials = (org?.orgName || "AX").split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase();
+  const memberSince = org?.createdAt
+    ? new Date(org.createdAt).toLocaleDateString("en-US", { month: "short", year: "numeric" })
+    : "—";
+
   return (
-    <ContentPage eyebrow="Workspace settings" title="Settings" description="Manage the Axon operations workspace, API credentials, and notifications.">
+    <ContentPage eyebrow="Workspace settings" title="Settings" description="Workspace identity, credentials, notifications, and session.">
       <div className="settings-layout">
         <nav className="settings-tabs" aria-label="Settings sections">
           <a className="active" href="#workspace">Workspace</a>
-          <a href="#auth">Authentication</a>
+          <a href="#auth">API key</a>
           <a href="#notifications">Notifications</a>
-          <a href="#access">Access</a>
+          <a href="#session">Session</a>
         </nav>
         <div className="settings-content">
+          <div className="settings-orgcard">
+            <span className="member-avatar">{initials}</span>
+            <span>
+              <b>{org?.orgName || workspaceName || "—"}</b>
+              <small>{org?.email || "—"} · Member since {memberSince}</small>
+            </span>
+            <StatusBadge status="OWNER" tone="neutral" />
+          </div>
+
           <section id="workspace" className="settings-section">
             <div className="settings-section-head">
               <div>
                 <span className="docs-label">Workspace</span>
-                <h2>{workspaceName}</h2>
-                <p>The workspace name appears in your navigation and protocol audit exports.</p>
+                <h2>Display preferences</h2>
+                <p>The workspace name appears in navigation and audit exports. Stored in this browser.</p>
               </div>
               <span className="settings-symbol"><Network size={18} /></span>
             </div>
             <label className="settings-field">
               Workspace name
-              <input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} />
+              <input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} placeholder={org?.orgName || "My workspace"} />
             </label>
             <label className="settings-field">
               Default network
@@ -2031,22 +2210,29 @@ export function Settings() {
             <div className="settings-section-head">
               <div>
                 <span className="docs-label">Credentials</span>
-                <h2>Axon API Key</h2>
-                <p>Used to authenticate requests across the Axon dashboard, MCP server, and CLI.</p>
+                <h2>API key</h2>
+                <p>Sent as a Bearer token to the dashboard API, MCP server, and CLI. {org?.protocols ?? 0} protocol{(org?.protocols ?? 0) === 1 ? "" : "s"} in this workspace.</p>
               </div>
               <span className="settings-symbol"><ShieldCheck size={18} /></span>
             </div>
             <label className="settings-field">
-              Active API Key (sent as Bearer token)
+              Active key
+              <div className="settings-keyrow">
+                <input value={org?.apiKey || "—"} readOnly spellCheck={false} aria-label="Masked API key" />
+                <button className="secondary-button" onClick={copyKey}>
+                  {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </label>
+            <label className="settings-field">
+              Replace key <span className="auth-optional">(paste a different workspace key)</span>
               <input
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="axon_live_..."
+                spellCheck={false}
               />
             </label>
-            <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--ink-faint)" }}>
-              Authenticated organisation: <b>{org?.name || "Sky Ecosystem"}</b>
-            </div>
           </section>
 
           <section id="notifications" className="settings-section">
@@ -2064,28 +2250,29 @@ export function Settings() {
               <i />
             </label>
             <label className="toggle-row">
-              <span><b>Weekly reliability digest</b><small>Receive a summary of execution delay and proof coverage.</small></span>
+              <span><b>Weekly reliability digest</b><small>A summary of execution delay and proof coverage.</small></span>
               <input type="checkbox" checked={digest} onChange={(event) => setDigest(event.target.checked)} />
               <i />
             </label>
           </section>
 
-          <section id="access" className="settings-section">
+          <section id="session" className="settings-section">
             <div className="settings-section-head">
               <div>
-                <span className="docs-label">Workspace access</span>
-                <h2>Team members</h2>
-                <p>People who can inspect execution and manage protocol registrations.</p>
+                <span className="docs-label">Session</span>
+                <h2>Sign out</h2>
+                <p>Clears this browser's workspace session. The API key stays valid — sign back in anytime.</p>
               </div>
-              <span className="settings-symbol"><Users size={18} /></span>
+              <span className="settings-symbol"><LogOut size={18} /></span>
             </div>
-            <div className="member-row">
-              <span className="member-avatar">{org?.name ? org.name.slice(0, 2).toUpperCase() : "SE"}</span>
+            <div className="settings-sessionrow">
               <span>
-                <b>{org?.name || "Sky Ecosystem"}</b>
-                <small>Owner · {org?.email || "ops@sky.money"}</small>
+                <b>Signed in as {org?.orgName || "—"}</b>
+                <small>{org?.email || "—"}</small>
               </span>
-              <StatusBadge status="OWNER" tone="neutral" />
+              <button className="secondary-button danger-button" onClick={handleSignOut} disabled={signingOut}>
+                <LogOut size={14} /> {signingOut ? "Signing out…" : "Sign out"}
+              </button>
             </div>
           </section>
 
@@ -2104,8 +2291,10 @@ export function Settings() {
 function LegalPage({ type }: { type: "privacy" | "terms" }) {
   const privacy = type === "privacy";
   return (
-    <AppShell title={privacy ? "Privacy" : "Terms"} eyebrow="Axon legal">
-      <div className="legal-page">
+    <div className="public-page">
+      <PublicHeader />
+      <main className="public-content">
+        <div className="legal-page">
         <Link href="/" className="back-link">
           <ArrowLeft size={15} /> Back to Axon
         </Link>
@@ -2153,8 +2342,10 @@ function LegalPage({ type }: { type: "privacy" | "terms" }) {
             </p>
           </section>
         </article>
-      </div>
-    </AppShell>
+        </div>
+      </main>
+      <PublicFooter />
+    </div>
   );
 }
 

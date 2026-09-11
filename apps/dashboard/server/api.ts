@@ -159,50 +159,6 @@ async function getLiveChainData() {
   return cachedChainProjection;
 }
 
-function loadDefaultConfigs(): any[] {
-  const candidates = [
-    path.resolve(process.cwd(), "packages/watcher/src/protocols/configs"),
-    path.resolve(process.cwd(), "../../packages/watcher/src/protocols/configs"),
-    path.resolve(import.meta.dirname, "../../../packages/watcher/src/protocols/configs"),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) {
-      try {
-        const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
-        return files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")));
-      } catch {
-        // continue
-      }
-    }
-  }
-  return [
-    {
-      id: "sky",
-      name: "Sky Protocol",
-      network: "Ethereum · Active",
-      governanceContract: "0x0a3f6849f78076aefaDf113F5BED87720274dDC0",
-      governanceType: "makerdao-spell",
-      status: "ACTIVE",
-    },
-    {
-      id: "aave",
-      name: "Aave",
-      network: "Ethereum · Monitoring",
-      governanceContract: "0x9AEE0B04504CeF83A65AC3f0e838D0593BCb2BC7",
-      governanceType: "openzeppelin-governor",
-      status: "MONITORING",
-    },
-    {
-      id: "compound",
-      name: "Compound",
-      network: "Ethereum · Monitoring",
-      governanceContract: "0xc0Da02939E1441F497fd74F78cE7Decb17B66529",
-      governanceType: "compound-governor",
-      status: "MONITORING",
-    },
-  ];
-}
-
 async function resolveOrg(req: Request) {
   const authHeader = req.headers.authorization;
   const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : null;
@@ -274,93 +230,57 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 2. GET /api/protocols
+  // 2. GET /api/protocols — ONLY protocols registered by the authenticated org.
+  // No hardcoded cards: an org with no protocols gets an empty list (empty state).
   router.get("/protocols", async (req: Request, res: Response) => {
     try {
       const org = await resolveOrg(req);
       const db = getPrisma();
 
       let dbProtocols: any[] = [];
-      let skyExecutedCount = 0;
-      let lastExecutedSpell: any = null;
-
       try {
         dbProtocols = await db.protocol.findMany({
           where: { orgId: org.id },
           orderBy: { createdAt: "desc" },
         });
-
-        skyExecutedCount = await db.spellRecord.count({
-          where: { status: "EXECUTED" },
-        });
-
-        lastExecutedSpell = await db.spellRecord.findFirst({
-          where: { status: "EXECUTED" },
-          orderBy: { executedAt: "desc" },
-        });
       } catch {
         // ignore
       }
 
-      const systemConfigs = loadDefaultConfigs();
-
-      let lastExecutionStr = "No executions yet";
-      let lastExecutionAddr = "";
-      if (lastExecutedSpell) {
-        lastExecutionAddr = lastExecutedSpell.spellAddress;
-        lastExecutionStr =
-          lastExecutedSpell.spellAddress.length > 12
-            ? `${lastExecutedSpell.spellAddress.slice(0, 6)}...${lastExecutedSpell.spellAddress.slice(-4)}`
-            : lastExecutedSpell.spellAddress;
+      // Per-protocol executed counts, scoped to this org
+      let executedByProtocol: Record<string, number> = {};
+      try {
+        const executed = await db.spellRecord.findMany({
+          where: { orgId: org.id, status: "EXECUTED" },
+          select: { protocolId: true },
+        });
+        for (const s of executed) {
+          executedByProtocol[s.protocolId] = (executedByProtocol[s.protocolId] ?? 0) + 1;
+        }
+      } catch {
+        // ignore
       }
 
-      const combined = [
-        ...systemConfigs.map((c) => {
-          const isActive = c.id === "sky";
-          return {
-            id: c.id,
-            name: c.id === "sky" ? "Sky" : c.name,
-            network: c.network || (isActive ? "Ethereum · Active" : "Ethereum · Monitoring"),
-            governanceContract: c.governanceContract,
-            governanceType: c.governanceType,
-            status: isActive ? "ACTIVE" : "MONITORING",
-            statusTone: isActive ? ("positive" as const) : ("warning" as const),
-            active: isActive,
-            executions: isActive ? String(skyExecutedCount || 1) : "",
-            delay: isActive ? "4m 12s" : "",
-            reliability: isActive ? "98.7%" : "",
-            next: isActive ? "In 18m" : "",
-            lastExecution: isActive ? lastExecutionStr : "",
-            lastExecutionAddr: isActive ? lastExecutionAddr : "",
-          };
-        }),
-        ...dbProtocols.map((p) => {
-          const cfg = (p.config as any) || {};
-          const isActive = p.status === "ACTIVE";
-          return {
-            id: p.id,
-            name: cfg.name || p.id,
-            network: cfg.network ? `${cfg.network} · ${p.status}` : `Ethereum · ${p.status}`,
-            governanceContract: cfg.governanceContract || "",
-            governanceType: cfg.governanceType || "openzeppelin-governor",
-            status: p.status,
-            statusTone: isActive ? ("positive" as const) : ("warning" as const),
-            active: isActive,
-            executions: isActive ? "0" : "",
-            delay: isActive ? "—" : "",
-            reliability: isActive ? "100%" : "",
-            next: isActive ? "Monitoring" : "",
-            lastExecution: "—",
-            lastExecutionAddr: "",
-          };
-        }),
-      ];
-
-      const seen = new Set<string>();
-      const protocols = combined.filter((p) => {
-        if (seen.has(p.id)) return false;
-        seen.add(p.id);
-        return true;
+      const protocols = dbProtocols.map((p) => {
+        const cfg = (p.config as any) || {};
+        const isActive = p.status === "ACTIVE";
+        const execCount = executedByProtocol[p.id] ?? 0;
+        return {
+          id: p.id,
+          name: cfg.name || p.id,
+          network: cfg.network ? `${cfg.network} · ${p.status}` : `Ethereum · ${p.status}`,
+          governanceContract: cfg.governanceContract || "",
+          governanceType: cfg.governanceType || "openzeppelin-governor",
+          status: p.status,
+          statusTone: isActive ? ("positive" as const) : ("warning" as const),
+          active: isActive,
+          executions: String(execCount),
+          delay: "—",
+          reliability: execCount > 0 ? "100%" : "—",
+          next: isActive ? "Monitoring" : "",
+          lastExecution: "—",
+          lastExecutionAddr: "",
+        };
       });
 
       res.json({ protocols, total: protocols.length });
@@ -369,12 +289,83 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 3. GET /api/queue - 100% real database records
+  // 2b. GET /api/protocols/:id — single protocol, org-scoped, with live
+  // State Projector value (USDS total supply read live from chain).
+  router.get("/protocols/:id", async (req: Request, res: Response) => {
+    try {
+      const org = await resolveOrg(req);
+      const db = getPrisma();
+      const { id } = req.params;
+
+      const p = await db.protocol.findFirst({
+        where: { id, orgId: org.id },
+      });
+      if (!p) {
+        return res.status(404).json({ error: "Protocol not found in this workspace" });
+      }
+
+      const cfg = (p.config as any) || {};
+      const isActive = p.status === "ACTIVE";
+      const [executed, failedCount, live] = await Promise.all([
+        db.spellRecord
+          .findMany({ where: { orgId: org.id, protocolId: p.id, status: "EXECUTED" } })
+          .catch(() => []),
+        db.spellRecord
+          .count({ where: { orgId: org.id, protocolId: p.id, status: "FAILED" } })
+          .catch(() => 0),
+        getLiveChainData(),
+      ]);
+
+      let delayMsTotal = 0;
+      let delaySamples = 0;
+      for (const s of executed) {
+        if (s.executedAt && s.earliestExecution) {
+          const diff = new Date(s.executedAt).getTime() - new Date(s.earliestExecution).getTime();
+          if (diff >= 0) {
+            delayMsTotal += diff;
+            delaySamples++;
+          }
+        }
+      }
+
+      const total = executed.length + failedCount;
+      const last = executed
+        .filter((s) => s.executedAt)
+        .sort((a, b) => new Date(b.executedAt!).getTime() - new Date(a.executedAt!).getTime())[0];
+
+      res.json({
+        id: p.id,
+        name: cfg.name || p.id,
+        network: cfg.network ? `${cfg.network} · ${p.status}` : `Ethereum · ${p.status}`,
+        governanceContract: cfg.governanceContract || "",
+        governanceType: cfg.governanceType || "openzeppelin-governor",
+        status: p.status,
+        statusTone: isActive ? "positive" : "warning",
+        active: isActive,
+        executions: executed.length,
+        averageDelay:
+          delaySamples > 0
+            ? `${Math.max(1, Math.round(delayMsTotal / delaySamples / 60000))}m`
+            : "—",
+        reliability: total > 0 ? `${((executed.length / total) * 100).toFixed(1)}%` : "—",
+        valueSecured: live.usdsSupply,
+        blockNumber: live.blockNumber,
+        lastExecution: last ? last.spellAddress : null,
+        registeredAt: p.createdAt,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 3. GET /api/queue - real database records scoped to the authenticated org
   router.get("/queue", async (req: Request, res: Response) => {
     try {
+      const org = await resolveOrg(req);
       const db = getPrisma();
       const records = await db.spellRecord.findMany({
         where: {
+          orgId: org.id,
           status: { in: ["QUEUED", "SIMULATING", "CONFLICT", "READY", "EXECUTING", "HELD"] },
         },
         orderBy: { nextExecutionWindow: "asc" },
@@ -430,12 +421,14 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 4. GET /api/history - 100% real database records
+  // 4. GET /api/history - real database records scoped to the authenticated org.
+  // No fabricated fallbacks: missing txHash/gas stay null so the UI shows "—".
   router.get("/history", async (req: Request, res: Response) => {
     try {
+      const org = await resolveOrg(req);
       const db = getPrisma();
       const records = await db.spellRecord.findMany({
-        where: { status: "EXECUTED" },
+        where: { orgId: org.id, status: "EXECUTED" },
         orderBy: { executedAt: "desc" },
         take: 50,
       });
@@ -471,9 +464,9 @@ export function createApiRouter(): Router {
           spellAddress: r.spellAddress,
           description: desc,
           executedAt: dateStr,
-          gasUsed: r.gasUsed ? `${(Number(r.gasUsed) / 1000000).toFixed(2)}m` : "1.25m",
+          gasUsed: r.gasUsed ? `${(Number(r.gasUsed) / 1000000).toFixed(2)}m` : null,
           score: r.simulationScore || "GREEN",
-          txHash: r.txHash || "0x3b89f5c4900a01981298cbfe1023812839b9281a8b9213123812984189214712",
+          txHash: r.txHash || null,
           keeperHubExecutionId: executionId,
           keeperHubWorkflowId: workflowId,
           keeperHubWorkflowUrl: workflowUrl,
@@ -533,7 +526,7 @@ export function createApiRouter(): Router {
         simulationScore: r.simulationScore || "GREEN",
         txHash: r.txHash,
         gasUsed: r.gasUsed ? r.gasUsed.toString() : null,
-        gasUsedFormatted: r.gasUsed ? `${(Number(r.gasUsed) / 1000).toFixed(0)}k` : "184k",
+        gasUsedFormatted: r.gasUsed ? `${(Number(r.gasUsed) / 1000).toFixed(0)}k` : null,
         gasPrice: live.gasGwei,
         ethUsd: live.ethPrice,
         usdsSupply: live.usdsSupply,
@@ -554,35 +547,112 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 5. GET /api/stats - computed from live chain + database + x402 payments
-  router.get("/stats", async (_req: Request, res: Response) => {
+  // 5b. GET /api/delays — org-scoped execution delays for the delay chart.
+  // Optional ?protocolId= narrows to one protocol. Chronological, oldest first.
+  router.get("/delays", async (req: Request, res: Response) => {
     try {
+      const org = await resolveOrg(req);
       const db = getPrisma();
-      const [execCount, liveChain, marketplaceWorkflows, settledPayments] = await Promise.all([
-        db.spellRecord.count({ where: { status: "EXECUTED" } }).catch(() => 1),
-        getLiveChainData(),
-        db.spellRecord.count({ where: { keeperHubWorkflowId: { not: null } } }).catch(() => 1),
-        db.executionPayment.findMany({ where: { status: "SETTLED" } }).catch(() => []),
-      ]);
+      const protocolId = typeof req.query.protocolId === "string" ? req.query.protocolId : undefined;
+
+      const executed = await db.spellRecord.findMany({
+        where: {
+          orgId: org.id,
+          status: "EXECUTED",
+          executedAt: { not: null },
+          ...(protocolId ? { protocolId } : {}),
+        },
+        orderBy: { executedAt: "asc" },
+        take: 30,
+      }).catch(() => []);
+
+      const delays = executed
+        .map((s) => {
+          const end = new Date(s.executedAt!).getTime();
+          const start = s.earliestExecution ? new Date(s.earliestExecution).getTime() : end;
+          return {
+            spellAddress: s.spellAddress,
+            executedAt: s.executedAt,
+            delayHours: Math.max(0, (end - start) / 3_600_000),
+          };
+        })
+        .filter((d) => Number.isFinite(d.delayHours));
+
+      res.json({ delays, count: delays.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 5. GET /api/stats - computed from live chain + this org's database rows.
+  // No fabricated numbers: an org with no executions gets zeros and "—".
+  router.get("/stats", async (req: Request, res: Response) => {
+    try {
+      const org = await resolveOrg(req);
+      const db = getPrisma();
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+
+      const [executed, failedCount, liveChain, marketplaceWorkflows, settledPayments] =
+        await Promise.all([
+          db.spellRecord
+            .findMany({ where: { orgId: org.id, status: "EXECUTED" } })
+            .catch(() => []),
+          db.spellRecord
+            .count({ where: { orgId: org.id, status: "FAILED" } })
+            .catch(() => 0),
+          getLiveChainData(),
+          db.spellRecord
+            .count({ where: { orgId: org.id, keeperHubWorkflowId: { not: null } } })
+            .catch(() => 0),
+          db.executionPayment
+            .findMany({ where: { orgId: org.id, status: "SETTLED" } })
+            .catch(() => []),
+        ]);
+
+      const execCount = executed.length;
+      const monthCount = executed.filter(
+        (s) => s.executedAt && new Date(s.executedAt) >= monthStart
+      ).length;
+
+      let delayMsTotal = 0;
+      let delaySamples = 0;
+      for (const s of executed) {
+        if (s.executedAt && s.earliestExecution) {
+          const diff = new Date(s.executedAt).getTime() - new Date(s.earliestExecution).getTime();
+          if (diff >= 0) {
+            delayMsTotal += diff;
+            delaySamples++;
+          }
+        }
+      }
+      const avgDelay =
+        delaySamples > 0
+          ? `${Math.max(1, Math.round(delayMsTotal / delaySamples / 60000))}m`
+          : "—";
+
+      const total = execCount + failedCount;
+      const reliability = total > 0 ? `${((execCount / total) * 100).toFixed(1)}%` : "—";
 
       const totalFeesCollected = settledPayments.reduce((acc, p) => acc + (p.feeUsdc || 0), 0);
       const x402PaymentsCount = settledPayments.length;
-      const avgFee = x402PaymentsCount > 0 ? (totalFeesCollected / x402PaymentsCount).toFixed(2) : "0.05";
+      const avgFee = x402PaymentsCount > 0 ? (totalFeesCollected / x402PaymentsCount).toFixed(2) : "0.00";
 
       res.json({
-        executionsThisMonth: execCount || 1,
-        executionsDelta: "↑ 18% from last month",
-        averageDelay: "4m 12s",
-        delayDelta: "↓ 96% since Axon",
-        reliability: "98.7%",
-        reliabilityContext: "Last 30 days · Sky",
+        executionsThisMonth: monthCount,
+        executionsDelta: monthCount > 0 ? "This month" : "—",
+        averageDelay: avgDelay,
+        delayDelta: delaySamples > 0 ? "Measured on-chain" : "—",
+        reliability,
+        reliabilityContext: total > 0 ? `Last 30 days · ${total} executions` : "No executions yet",
         valueSecured: liveChain.usdsSupply,
         valueContext: "Live USDS total supply",
         blockNumber: liveChain.blockNumber,
-        marketplaceWorkflows: marketplaceWorkflows || 1,
+        marketplaceWorkflows,
         totalFeesCollected: Number(totalFeesCollected.toFixed(2)),
         avgFeePerExecution: `$${avgFee} USDC`,
-        x402PaymentsCount: x402PaymentsCount || 0,
+        x402PaymentsCount,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -650,9 +720,9 @@ export function createApiRouter(): Router {
         conflictDetail: spell.conflictDetail,
         executedAt: spell.executedAt || spell.calledAt,
         calledAt: spell.calledAt,
-        txHash: spell.txHash || "0x3b89f5c4900a01981298cbfe1023812839b9281a8b9213123812984189214712",
-        gasUsed: spell.gasUsed ? spell.gasUsed.toString() : "1248921",
-        gasUsedFormatted: spell.gasUsed ? `${(Number(spell.gasUsed) / 1000000).toFixed(2)}m` : "1.25m",
+        txHash: spell.txHash || null,
+        gasUsed: spell.gasUsed ? spell.gasUsed.toString() : null,
+        gasUsedFormatted: spell.gasUsed ? `${(Number(spell.gasUsed) / 1000000).toFixed(2)}m` : null,
         gasPrice: live.gasGwei,
         ethUsd: live.ethPrice,
         usdsSupply: live.usdsSupply,

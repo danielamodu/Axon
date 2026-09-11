@@ -317,7 +317,7 @@ export function Signup() {
             value={orgName}
             onChange={(e) => setOrgName(e.target.value)}
             onBlur={() => setTouched((t) => ({ ...t, org: true }))}
-            placeholder="Sky Ops"
+            placeholder="My Protocol Ops"
           />
           {touched.org && !orgOk && <small className="auth-field-error">Organisation name is required</small>}
         </label>
@@ -333,7 +333,7 @@ export function Signup() {
           {touched.email && !emailOk && <small className="auth-field-error">Enter a valid email</small>}
         </label>
         <label>
-          Password * <span className="auth-strength">strength: {password ? strength.label : "—"}</span>
+          Password *
           <input
             type="password"
             value={password}
@@ -341,6 +341,13 @@ export function Signup() {
             onBlur={() => setTouched((t) => ({ ...t, pw: true }))}
             placeholder="Min 8 characters"
           />
+          {password && (
+            <span className="auth-meter" aria-label={`Password strength: ${strength.label}`}>
+              {[1, 2, 3, 4, 5].map((n) => (
+                <i key={n} className={strength.score >= n ? `on-${strength.score}` : ""} />
+              ))}
+            </span>
+          )}
           {touched.pw && !pwOk && <small className="auth-field-error">Min 8 characters</small>}
         </label>
         <label>

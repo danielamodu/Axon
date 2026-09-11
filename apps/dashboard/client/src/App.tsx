@@ -17,7 +17,7 @@ function Router() {
       <Route path={"/signup"} component={Signup} />
       <Route path={"/dashboard"} component={Dashboard} />
       <Route path={"/app"} component={Dashboard} />
-      <Route path={"/protocol/sky"} component={ProtocolDetail} />
+      <Route path={"/protocol/:id"} component={ProtocolDetail} />
       <Route path={"/register"} component={Register} />
       <Route path={"/execution/:txHash"} component={ExecutionDetail} />
       <Route path={"/docs"} component={Docs} />
