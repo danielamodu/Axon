@@ -106,7 +106,7 @@ Ensure the following variables are set in `.env`:
 DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 ETH_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
 BASE_SEPOLIA_RPC="https://sepolia.base.org"
-AXON_REGISTRY_ADDRESS="0xBf4bc8ACCbd771AeFC68de80a4ED3fa5442DD70B"
+AXON_REGISTRY_ADDRESS="0x572436712eADc4117202D36bdaFe1c54B6231330"
 ```
 
 Push the database schema to your PostgreSQL instance:
@@ -257,7 +257,7 @@ struct ExecutionRecord {
 
 | Network | Contract | Address | Explorer |
 | :--- | :--- | :--- | :--- |
-| **Base Sepolia** | `AxonRegistry` | `0xBf4bc8ACCbd771AeFC68de80a4ED3fa5442DD70B` | [BaseScan](https://sepolia.basescan.org/address/0xBf4bc8ACCbd771AeFC68de80a4ED3fa5442DD70B) |
+| **Base Sepolia** | `AxonRegistry` | `0x572436712eADc4117202D36bdaFe1c54B6231330` | [BaseScan](https://sepolia.basescan.org/address/0x572436712eADc4117202D36bdaFe1c54B6231330) |
 
 ---
 
