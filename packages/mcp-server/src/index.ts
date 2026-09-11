@@ -39,6 +39,79 @@ export function sanitize(obj: any): any {
   )
 }
 
+export interface SimulationStateView {
+  spellAddress: string
+  protocolId: string
+  simulationScore: string
+  status: string
+  projectionAvailable: boolean
+  projectedAt?: string
+  avgGasGwei?: number
+  gasVolatilityGwei?: number
+  usdsTotalSupply?: number
+  vatHeadroomUsds?: number
+  ethPriceUsd?: number
+  oracleAgeSeconds?: number
+  reasons?: string[]
+  simulatedVia?: string
+  simulationSuccess?: boolean
+  note?: string
+}
+
+/**
+ * Builds the simulation-state view from a spell's stored projection.
+ * The StateProjector persists its full assessment as JSON in
+ * SpellRecord.conflictDetail — this reads that back. When no projection
+ * has been stored yet it says so explicitly instead of inventing numbers.
+ */
+export function buildSimulationState(
+  spellAddress: string,
+  spell: {
+    protocolId?: string | null
+    status?: string | null
+    simulationScore?: string | null
+    conflictDetail?: string | null
+  } | null
+): SimulationStateView {
+  const base: SimulationStateView = {
+    spellAddress,
+    protocolId: spell?.protocolId ?? 'unknown',
+    status: spell?.status ?? 'UNKNOWN',
+    simulationScore: spell?.simulationScore ?? 'PENDING',
+    projectionAvailable: false,
+  }
+
+  if (!spell) {
+    return { ...base, note: 'Spell not found in this workspace.' }
+  }
+  if (!spell.conflictDetail) {
+    return { ...base, note: 'No projection stored yet — spell has not been simulated.' }
+  }
+
+  try {
+    const d = JSON.parse(spell.conflictDetail)
+    if (!d || !d.gasTrend) {
+      return { ...base, note: 'Stored projection is incomplete — awaiting simulation.' }
+    }
+    return {
+      ...base,
+      projectionAvailable: true,
+      projectedAt: d.projectedAt,
+      avgGasGwei: d.gasTrend?.averageGwei,
+      gasVolatilityGwei: d.gasTrend?.stddevGwei,
+      usdsTotalSupply: d.usdsTotalSupply,
+      vatHeadroomUsds: d.vatHeadroomUsds,
+      ethPriceUsd: d.ethPriceUsd,
+      oracleAgeSeconds: d.oracleAgeSeconds,
+      reasons: Array.isArray(d.reasons) ? d.reasons : undefined,
+      simulatedVia: d.simulation?.simulatedVia,
+      simulationSuccess: d.simulation?.success,
+    }
+  } catch {
+    return { ...base, note: 'Stored projection could not be parsed.' }
+  }
+}
+
 // Helper to load protocol configs
 export function loadAllConfigs(): any[] {
   const dir = getConfigsDir()
@@ -461,17 +534,8 @@ server.tool(
       where: { spellAddress },
     })
 
-    // Return current projected state for the spell
-    const state = {
-      spellAddress,
-      protocolId: spell?.protocolId ?? 'sky',
-      simulationScore: spell?.simulationScore ?? 'GREEN',
-      avgGasGwei: 28.5,
-      usdsTotalSupply: '4982145892.42',
-      vatHeadroom: '520000000.00',
-      ethPrice: 2450.75,
-      status: spell?.status ?? 'QUEUED',
-    }
+    // Live projection persisted by the StateProjector — never fabricated.
+    const state = buildSimulationState(spellAddress, spell)
 
     return {
       content: [{ type: 'text', text: JSON.stringify(state, null, 2) }],

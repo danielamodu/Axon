@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { loadAllConfigs, sanitize } from '../index'
+import { buildSimulationState, loadAllConfigs, sanitize } from '../index'
 
 describe('@axon/mcp-server', () => {
   it('loads default protocol configs', () => {
@@ -48,5 +48,69 @@ describe('@axon/mcp-server', () => {
     expect(res.authorized).toBe(true)
     expect(res.org).toBeDefined()
     expect(res.org?.id).toBe('test_org_default')
+  })
+})
+
+describe('buildSimulationState', () => {
+  const stored = JSON.stringify({
+    score: 'GREEN',
+    reasons: ['Clean simulation'],
+    projectedAt: '2026-09-10T12:00:00.000Z',
+    gasTrend: { averageGwei: 8.4, stddevGwei: 1.2, recentBlocks: [8, 9, 8] },
+    usdsTotalSupply: 4982145892.42,
+    vatHeadroomUsds: 520000000,
+    ethPriceUsd: 2450.75,
+    oracleAgeSeconds: 12,
+    simulation: { success: true, simulatedVia: 'viem' },
+  })
+
+  it('returns the stored live projection when present', () => {
+    const view = buildSimulationState('0xabc', {
+      protocolId: 'sky',
+      status: 'READY',
+      simulationScore: 'GREEN',
+      conflictDetail: stored,
+    })
+    expect(view.projectionAvailable).toBe(true)
+    expect(view.avgGasGwei).toBe(8.4)
+    expect(view.vatHeadroomUsds).toBe(520000000)
+    expect(view.simulatedVia).toBe('viem')
+    expect(view.simulationSuccess).toBe(true)
+  })
+
+  it('says so explicitly when no projection exists yet', () => {
+    const view = buildSimulationState('0xabc', {
+      protocolId: 'sky',
+      status: 'QUEUED',
+      simulationScore: null,
+      conflictDetail: null,
+    })
+    expect(view.projectionAvailable).toBe(false)
+    expect(view.note).toContain('not been simulated')
+    expect(view.avgGasGwei).toBeUndefined()
+  })
+
+  it('handles unknown spells without inventing data', () => {
+    const view = buildSimulationState('0xmissing', null)
+    expect(view.projectionAvailable).toBe(false)
+    expect(view.status).toBe('UNKNOWN')
+  })
+
+  it('handles unparseable stored projections', () => {
+    const view = buildSimulationState('0xabc', {
+      protocolId: 'sky',
+      status: 'READY',
+      simulationScore: 'GREEN',
+      conflictDetail: '{not json',
+    })
+    expect(view.projectionAvailable).toBe(false)
+    expect(view.note).toContain('could not be parsed')
+  })
+
+  it('never contains the legacy hardcoded studio values', () => {
+    const raw = JSON.stringify(
+      buildSimulationState('0xabc', { protocolId: 'sky', status: 'QUEUED', conflictDetail: null })
+    )
+    expect(raw).not.toContain('4982145892.42')
   })
 })
