@@ -25,12 +25,16 @@ model Organisation {
 }
 
 model Protocol {
-  id          String        @id @default(cuid())
-  orgId       String
-  org         Organisation  @relation(fields: [orgId], references: [id])
-  config      Json          // ProtocolConfig stored here
-  status      String        @default("MONITORING")
-  createdAt   DateTime      @default(now())
+  id                   String        @id @default(cuid())
+  orgId                String
+  org                  Organisation  @relation(fields: [orgId], references: [id])
+  config               Json          // ProtocolConfig stored here
+  status               String        @default("MONITORING")
+  keeperHubTemplateId  String?
+  keeperHubTemplateUrl String?
+  keeperHubWalletId    String?
+  keeperHubWalletAddress String?
+  createdAt            DateTime      @default(now())
 }
 
 model SpellRecord {
@@ -50,6 +54,7 @@ model SpellRecord {
   simulationScore       SimulationScore?
   conflictStatus        ConflictStatus?
   conflictDetail        String?
+  detectionSource       String?         // "watcher" | "keeperhub-scheduler" | "both"
   executedAt            DateTime?
   txHash                String?
   gasUsed               BigInt?

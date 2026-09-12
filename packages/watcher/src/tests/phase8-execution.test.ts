@@ -91,22 +91,30 @@ describe('Phase 8 — KeeperHub Execution Depth & Verification', () => {
   })
 
   it('buildAndRegisterWorkflow constructs workflow with notification nodes 4a and 8', async () => {
-    const mockKhClient: any = {
-      createWorkflow: vi.fn().mockResolvedValue({ id: 'wf-mock-id' }),
-      rawRequest: vi.fn().mockResolvedValue({ ok: true, result: { valid: true } }),
+    const prevMode = process.env.PAYMENT_MODE
+    process.env.PAYMENT_MODE = 'gateway'
+    try {
+      const mockKhClient: any = {
+        createWorkflow: vi.fn().mockResolvedValue({ id: 'wf-mock-id' }),
+        rawRequest: vi.fn().mockResolvedValue({ ok: true, result: { valid: true } }),
+      }
+      const engine = new ExecutionEngine(mockPublicClient, mockPrisma, mockNotify, mockKhClient, mockRegistry)
+
+      const wfId = await engine.buildAndRegisterWorkflow(dummySpell)
+      expect(wfId).toBe('wf-mock-id')
+      expect(mockKhClient.createWorkflow).toHaveBeenCalledOnce()
+
+      const createCall = mockKhClient.createWorkflow.mock.calls[0][0]
+      const nodeIds = createCall.nodes.map((n: any) => n.id)
+
+      expect(nodeIds).toContain('notify-discord-sim-failure')
+      expect(nodeIds).toContain('notify-discord-success')
+      expect(nodeIds).not.toContain('x402-payment-verify')
+      expect(nodeIds.length).toBe(10) // 10 nodes including trigger and failure branch
+    } finally {
+      if (prevMode === undefined) delete process.env.PAYMENT_MODE
+      else process.env.PAYMENT_MODE = prevMode
     }
-    const engine = new ExecutionEngine(mockPublicClient, mockPrisma, mockNotify, mockKhClient, mockRegistry)
-
-    const wfId = await engine.buildAndRegisterWorkflow(dummySpell)
-    expect(wfId).toBe('wf-mock-id')
-    expect(mockKhClient.createWorkflow).toHaveBeenCalledOnce()
-
-    const createCall = mockKhClient.createWorkflow.mock.calls[0][0]
-    const nodeIds = createCall.nodes.map((n: any) => n.id)
-
-    expect(nodeIds).toContain('notify-discord-sim-failure')
-    expect(nodeIds).toContain('notify-discord-success')
-    expect(nodeIds.length).toBe(10) // 10 nodes including trigger and failure branch
   })
 
   it('buildAndRegisterWorkflow routes check-simulation false branch to discord failure node', async () => {

@@ -13,6 +13,7 @@ import { SKY_CHIEF_ADDRESS, EXECUTOR_POLL_INTERVAL_MS, MAX_GAS_PRICE_GWEI } from
 import { isWithinOfficeHours } from './office-hours'
 import { NotificationDispatcher } from './notifications'
 import { RegistryWriter } from './registry-writer'
+import { ProtocolWalletManager } from './protocol-wallets'
 import { createX402Client } from './payment'
 import { logger } from './logger'
 
@@ -25,6 +26,48 @@ const POLL_PHASE_2_INTERVAL_MS = 30_000      // 30 s for next 5 minutes
 const POLL_PHASE_2_DURATION_MS = 7 * 60_000  // up to 7 minutes elapsed
 const POLL_PHASE_3_INTERVAL_MS = 60_000      // 60 s thereafter
 const POLL_TIMEOUT_MS = 30 * 60_000          // 30 minute hard cap
+
+// ---------------------------------------------------------------------------
+// Phase 9 F2 — human-readable node tags. KeeperHub's dashboard renders these
+// instead of bare node ids, so the full Axon pipeline stays legible there.
+// The KeeperHub SDK node type predates tags, hence the targeted cast.
+// ---------------------------------------------------------------------------
+export const AXON_NODE_TAGS: Record<string, string> = {
+  'trigger': 'axon:workflow-trigger',
+  'x402-payment-verify': 'axon:x402-payment',
+  'read-hat': 'axon:hat-guard',
+  'check-hat': 'axon:hat-condition',
+  'simulate-cast': 'axon:pre-flight-simulation',
+  'check-simulation': 'axon:simulation-condition',
+  'notify-discord-sim-failure': 'axon:notify-failure',
+  'execute-cast': 'axon:governance-execution',
+  'verify-hat': 'axon:post-execution-verify',
+  'notify-registry': 'axon:registry-write',
+  'notify-discord-success': 'axon:notify-success',
+}
+
+export function withNodeTags(nodes: WorkflowNode[]): WorkflowNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    data: {
+      ...(node.data ?? {}),
+      tags: [AXON_NODE_TAGS[node.id] ?? 'axon:node'],
+    } as WorkflowNode['data'],
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9 F6 — payment mode. `native` (default) embeds x402 verification as
+// Node 0 of the KeeperHub workflow graph so payment and execution are atomic.
+// `gateway` keeps the legacy separate x402 gateway call in executeSpell.
+// ---------------------------------------------------------------------------
+export type PaymentMode = 'native' | 'gateway'
+
+export function getPaymentMode(): PaymentMode {
+  return process.env.PAYMENT_MODE === 'gateway' ? 'gateway' : 'native'
+}
+
+export const X402_FEE_USDC = '0.05'
 
 export interface ExecutionReport {
   spellAddress: string
@@ -46,6 +89,7 @@ export class ExecutionEngine {
   private prisma: PrismaClient
   private notify: NotificationDispatcher
   private registryWriter: RegistryWriter
+  private wallets: ProtocolWalletManager
   private khClient?: KeeperHubClient
   private direct?: DirectExecutor
   private running = false
@@ -56,12 +100,14 @@ export class ExecutionEngine {
     prisma: PrismaClient,
     notify?: NotificationDispatcher,
     keeperHubApiKeyOrClient?: string | KeeperHubClient,
-    registryWriter?: RegistryWriter
+    registryWriter?: RegistryWriter,
+    walletManager?: ProtocolWalletManager
   ) {
     this.client = client
     this.prisma = prisma
     this.notify = notify ?? new NotificationDispatcher()
     this.registryWriter = registryWriter ?? new RegistryWriter()
+    this.wallets = walletManager ?? new ProtocolWalletManager(undefined, prisma)
 
     if (typeof keeperHubApiKeyOrClient === 'object' && keeperHubApiKeyOrClient !== null) {
       this.khClient = keeperHubApiKeyOrClient as KeeperHubClient
@@ -196,8 +242,18 @@ export class ExecutionEngine {
       }
     }
 
-    // Step 3: Build and register KeeperHub workflow
-    const workflowId = await this.buildAndRegisterWorkflow(spell)
+    // Step 3: Build and register KeeperHub workflow.
+    // Phase 9 F5 — resolve the protocol-scoped wallet so this protocol's
+    // transactions never spend another protocol's scope (null = shared wallet).
+    const protocolWallet = await this.wallets.getWallet(spell.protocolId).catch(() => null)
+    const walletId = protocolWallet?.walletId
+    if (walletId) {
+      logger.info(
+        { spellAddress, walletId, address: protocolWallet?.address },
+        '👛 Using protocol-scoped KeeperHub wallet'
+      )
+    }
+    const workflowId = await this.buildAndRegisterWorkflow(spell, walletId ?? undefined)
     const dryRun = !this.khClient || workflowId.startsWith('local-workflow-')
     if (dryRun) {
       logger.warn(
@@ -232,30 +288,44 @@ export class ExecutionEngine {
       workflowId,
     })
 
-    // Step 6: Trigger the workflow via x402 payment gateway or direct
+    // Step 6: Trigger the workflow — via x402 payment gateway or natively.
+    // Phase 9 F6: PAYMENT_MODE=native (default) keeps payment inside the
+    // workflow graph (Node 0) and only passes a payment reference on trigger.
+    // PAYMENT_MODE=gateway preserves the legacy separate gateway call.
+    const paymentMode = getPaymentMode()
     let executionId = `local-exec-${Date.now()}`
     let x402PaymentTxHash: string | undefined
 
-    try {
-      const paymentClient = createX402Client({
-        privateKey: process.env.BASE_REGISTRY_PRIVATE_KEY as `0x${string}`,
-        chain: base,
-        maxPaymentUsdc: 0.10,
-      })
-      const paymentResult = await paymentClient.post(
-        `${process.env.X402_GATEWAY_URL || 'http://localhost:3003'}/execute/spell`,
-        {
-          spellAddress: spell.spellAddress,
-          workflowId,
-          orgId: spell.orgId,
+    if (paymentMode === 'gateway') {
+      try {
+        const paymentClient = createX402Client({
+          privateKey: process.env.BASE_REGISTRY_PRIVATE_KEY as `0x${string}`,
+          chain: base,
+          maxPaymentUsdc: 0.10,
+        })
+        const paymentResult = await paymentClient.post(
+          `${process.env.X402_GATEWAY_URL || 'http://localhost:3003'}/execute/spell`,
+          {
+            spellAddress: spell.spellAddress,
+            workflowId,
+            orgId: spell.orgId,
+          }
+        )
+        if (paymentResult?.executionId) {
+          executionId = paymentResult.executionId
         }
-      )
-      if (paymentResult?.executionId) {
-        executionId = paymentResult.executionId
+        x402PaymentTxHash = paymentResult?.paymentTxHash
+      } catch {
+        executionId = await this.triggerWorkflow(workflowId, spell, walletId ?? undefined)
       }
-      x402PaymentTxHash = paymentResult?.paymentTxHash
-    } catch {
-      executionId = await this.triggerWorkflow(workflowId, spell)
+    } else {
+      logger.info({ spellAddress, workflowId }, '💳 Native x402 mode: payment verified in-graph (Node 0)')
+      executionId = await this.triggerWorkflow(workflowId, spell, walletId ?? undefined, {
+        x402PaymentReference: spell.spellAddress,
+        x402AmountUsdc: X402_FEE_USDC,
+        x402Currency: 'USDC',
+        x402Network: 'base',
+      })
     }
 
     if (x402PaymentTxHash) {
@@ -460,7 +530,7 @@ export class ExecutionEngine {
   // Step 3: Build and register KeeperHub workflow
   // -------------------------------------------------------------------------
 
-  async buildAndRegisterWorkflow(spell: SpellRecord): Promise<string> {
+  async buildAndRegisterWorkflow(spell: SpellRecord, walletId?: string): Promise<string> {
     if (!this.khClient) {
       // No KeeperHub — return sentinel ID for testing
       return `local-workflow-${spell.spellAddress.slice(2, 10)}`
@@ -481,6 +551,32 @@ export class ExecutionEngine {
         },
         position: { x: 0, y: 0 },
       },
+      // Node 0b (Phase 9 F6, native mode only): x402 payment verification.
+      // Payment becomes part of the graph — atomic with execution.
+      ...(getPaymentMode() === 'native'
+        ? [
+            {
+              id: 'x402-payment-verify',
+              type: 'action',
+              data: {
+                label: 'Verify x402 USDC payment',
+                type: 'webhook',
+                config: {
+                  url: process.env.X402_FACILITATOR_URL ?? 'https://facilitator.axon.internal/verify',
+                  method: 'POST',
+                  body: JSON.stringify({
+                    amount: X402_FEE_USDC,
+                    currency: 'USDC',
+                    network: 'base',
+                    payTo: process.env.X402_PAY_TO ?? '',
+                    reference: spellAddress,
+                  }),
+                },
+              },
+              position: { x: 250, y: 0 },
+            } as WorkflowNode,
+          ]
+        : []),
       // Node 1: Read Chief.hat() — guard
       {
         id: 'read-hat',
@@ -574,6 +670,8 @@ export class ExecutionEngine {
             functionName: 'cast',
             abi: JSON.stringify(SPELL_ABI),
             gasLimitMultiplier: '1.3',
+            // Phase 9 F5 — protocol-scoped execution wallet (omit = shared).
+            ...(walletId ? { walletId } : {}),
           },
         },
         position: { x: 0, y: 750 },
@@ -637,8 +735,15 @@ export class ExecutionEngine {
       },
     ]
 
+    const nativePayment = getPaymentMode() === 'native'
     const edges: WorkflowEdge[] = [
-      { id: 'e0-1', source: 'trigger', target: 'read-hat' },
+      // Phase 9 F6 — native mode routes trigger through Node 0 (x402 verify).
+      ...(nativePayment
+        ? [
+            { id: 'e0-x', source: 'trigger', target: 'x402-payment-verify' },
+            { id: 'ex-1', source: 'x402-payment-verify', target: 'read-hat' },
+          ] as WorkflowEdge[]
+        : [{ id: 'e0-1', source: 'trigger', target: 'read-hat' }]),
       { id: 'e1-2', source: 'read-hat', target: 'check-hat' },
       { id: 'e2-3', source: 'check-hat', target: 'simulate-cast', sourceHandle: 'true' },
       { id: 'e3-4', source: 'simulate-cast', target: 'check-simulation' },
@@ -652,8 +757,9 @@ export class ExecutionEngine {
     const createInput: CreateWorkflowInput = {
       name: workflowName,
       description: `Axon autonomous execution workflow for Sky Protocol spell ${spellAddress}. ` +
-        `Guards: hat check, simulation, gas check. Executes cast() and records outcome.`,
-      nodes,
+        `Guards: hat check, simulation, gas check. Executes cast() and records outcome.` +
+        (walletId ? ` Protocol-scoped wallet: ${walletId}.` : ''),
+      nodes: withNodeTags(nodes),
       edges,
     }
 
@@ -680,7 +786,12 @@ export class ExecutionEngine {
   // Step 4: Trigger workflow execution
   // -------------------------------------------------------------------------
 
-  async triggerWorkflow(workflowId: string, spell: SpellRecord): Promise<string> {
+  async triggerWorkflow(
+    workflowId: string,
+    spell: SpellRecord,
+    walletId?: string,
+    payment?: Record<string, string>
+  ): Promise<string> {
     if (!this.khClient || workflowId.startsWith('local-workflow-')) {
       // Dry-run mode
       logger.info({ workflowId }, '🏃 [DRY RUN] Workflow execution triggered')
@@ -690,6 +801,10 @@ export class ExecutionEngine {
     const response = await this.khClient.executeWorkflow(workflowId, {
       spellAddress: spell.spellAddress,
       triggeredAt: new Date().toISOString(),
+      // Phase 9 F5 — route execution through the protocol-scoped wallet.
+      ...(walletId ? { walletId } : {}),
+      // Phase 9 F6 — native payment reference for in-graph Node 0 verify.
+      ...(payment ? { payment } : {}),
     })
 
     logger.info({ workflowId, executionId: response.executionId }, '▶️ Workflow execution triggered')
