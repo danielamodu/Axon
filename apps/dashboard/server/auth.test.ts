@@ -204,4 +204,9 @@ describe("auth + watcher HTTP endpoints (no-DB paths)", () => {
     const res = await fetch(`${base}/watcher/status`);
     expect(res.status).toBe(401);
   });
+
+  it("GET /sync/status rejects unauthenticated with 401", async () => {
+    const res = await fetch(`${base}/sync/status`);
+    expect(res.status).toBe(401);
+  });
 });

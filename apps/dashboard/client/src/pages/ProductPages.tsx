@@ -1336,6 +1336,37 @@ export function ProtocolDetail() {
                   <dd>{protocol?.governanceType || "—"}</dd>
                 </div>
                 <div>
+                  <dt>Execution wallet</dt>
+                  <dd>
+                    {protocol?.keeperHubWalletAddress ? (
+                      <a
+                        className="table-link"
+                        href="https://app.keeperhub.com/wallets"
+                        target="_blank"
+                        rel="noreferrer"
+                        title={protocol.keeperHubWalletAddress}
+                      >
+                        <CopyValue value={protocol.keeperHubWalletAddress}>
+                          {protocol.keeperHubWalletAddress.slice(0, 6)}...{protocol.keeperHubWalletAddress.slice(-4)}
+                        </CopyValue>
+                        <ExternalLink size={12} />
+                      </a>
+                    ) : (
+                      "Shared wallet"
+                    )}
+                  </dd>
+                </div>
+                {protocol?.keeperHubTemplateUrl ? (
+                  <div>
+                    <dt>KH template</dt>
+                    <dd>
+                      <a className="table-link" href={protocol.keeperHubTemplateUrl} target="_blank" rel="noreferrer">
+                        View template <ExternalLink size={12} />
+                      </a>
+                    </dd>
+                  </div>
+                ) : null}
+                <div>
                   <dt>Execution provider</dt>
                   <dd><Zap size={13} /> KeeperHub</dd>
                 </div>

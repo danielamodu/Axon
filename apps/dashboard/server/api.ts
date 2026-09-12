@@ -280,6 +280,9 @@ export function createApiRouter(): Router {
           next: isActive ? "Monitoring" : "",
           lastExecution: "—",
           lastExecutionAddr: "",
+          keeperHubTemplateId: (p as any).keeperHubTemplateId ?? null,
+          keeperHubTemplateUrl: (p as any).keeperHubTemplateUrl ?? null,
+          keeperHubWalletAddress: (p as any).keeperHubWalletAddress ?? null,
         };
       });
 
@@ -352,6 +355,10 @@ export function createApiRouter(): Router {
         blockNumber: live.blockNumber,
         lastExecution: last ? last.spellAddress : null,
         registeredAt: p.createdAt,
+        keeperHubTemplateId: (p as any).keeperHubTemplateId ?? null,
+        keeperHubTemplateUrl: (p as any).keeperHubTemplateUrl ?? null,
+        keeperHubWalletId: (p as any).keeperHubWalletId ?? null,
+        keeperHubWalletAddress: (p as any).keeperHubWalletAddress ?? null,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -639,6 +646,33 @@ export function createApiRouter(): Router {
       const x402PaymentsCount = settledPayments.length;
       const avgFee = x402PaymentsCount > 0 ? (totalFeesCollected / x402PaymentsCount).toFixed(2) : "0.00";
 
+      // Phase 9 — detection provenance + oracle mode from the latest spell.
+      let detectionSource = "watcher";
+      let lastDetectedBy: string | null = null;
+      let oracleMode: "keeperhub" | "viem-fallback" = "viem-fallback";
+      try {
+        const latest = await db.spellRecord.findFirst({
+          where: { orgId: org.id },
+          orderBy: { calledAt: "desc" },
+        });
+        if (latest?.detectionSource) {
+          detectionSource = latest.detectionSource;
+          lastDetectedBy = `${latest.detectionSource} · ${latest.spellAddress.slice(0, 10)}…`;
+        }
+        if (latest?.conflictDetail) {
+          try {
+            const detail = JSON.parse(latest.conflictDetail);
+            if (detail.oracleMode === "keeperhub" || detail.oracleMode === "viem-fallback") {
+              oracleMode = detail.oracleMode;
+            }
+          } catch {
+            // ignore malformed detail
+          }
+        }
+      } catch {
+        // ignore
+      }
+
       res.json({
         executionsThisMonth: monthCount,
         executionsDelta: monthCount > 0 ? "This month" : "—",
@@ -653,6 +687,45 @@ export function createApiRouter(): Router {
         totalFeesCollected: Number(totalFeesCollected.toFixed(2)),
         avgFeePerExecution: `$${avgFee} USDC`,
         x402PaymentsCount,
+        oracleMode,
+        detectionSource,
+        lastDetectedBy,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 5b. GET /api/sync/status — KeeperHub bidirectional sync state (Phase 9 F2).
+  // Fully DB-derived: last sync = newest spell touched by a KH execution.
+  router.get("/sync/status", async (req: Request, res: Response) => {
+    try {
+      const org = await requireOrg(req, res);
+      if (!org) return;
+      const db = getPrisma();
+
+      const [lastSynced, pendingSyncs, syncedExecutions] = await Promise.all([
+        db.spellRecord
+          .findFirst({
+            where: { orgId: org.id, keeperHubExecutionId: { not: null } },
+            orderBy: { updatedAt: "desc" },
+          })
+          .catch(() => null),
+        db.spellRecord
+          .count({ where: { orgId: org.id, status: "EXECUTING" } })
+          .catch(() => 0),
+        db.spellRecord
+          .count({ where: { orgId: org.id, status: "EXECUTED", keeperHubExecutionId: { not: null } } })
+          .catch(() => 0),
+      ]);
+
+      const base =
+        process.env.AXON_WEBHOOK_BASE_URL ?? `http://localhost:${process.env.WEBHOOK_SERVER_PORT ?? 3001}`;
+      res.json({
+        lastKeeperHubSync: lastSynced?.updatedAt ?? null,
+        pendingSyncs,
+        syncedExecutions,
+        webhookEndpoint: `${base.replace(/\/$/, "")}/webhook/keeperhub`,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
