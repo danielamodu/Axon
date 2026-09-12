@@ -163,7 +163,16 @@ export class GovernanceWatcher {
     })
 
     if (existing) {
-      logger.info({ protocol: this.config.id, spellAddress }, 'Spell already in DB — skipping')
+      // Scheduler may have recorded this hat first — mark dual detection.
+      if (existing.detectionSource === 'keeperhub-scheduler') {
+        await this.prisma.spellRecord.update({
+          where: { spellAddress },
+          data: { detectionSource: 'both' },
+        })
+        logger.info({ protocol: this.config.id, spellAddress }, 'Dual detection confirmed (scheduler + watcher)')
+      } else {
+        logger.info({ protocol: this.config.id, spellAddress }, 'Spell already in DB — skipping')
+      }
       return
     }
 
@@ -204,7 +213,8 @@ export class GovernanceWatcher {
 
     const status = spell.done ? 'EXECUTED' : 'QUEUED'
 
-    // Persist to DB
+    // Persist to DB — polling watcher is the detecting source unless the
+    // KeeperHub scheduler already recorded this hat (deduplicated there).
     await this.prisma.spellRecord.create({
       data: {
         protocolId: this.config.id,
@@ -217,6 +227,7 @@ export class GovernanceWatcher {
         calldata: record.calldata,
         actions: record.actions,
         status,
+        detectionSource: 'watcher',
         executedAt: spell.done ? (spell.expiration > now ? now : spell.expiration) : null,
       },
     })

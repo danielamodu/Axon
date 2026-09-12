@@ -217,6 +217,7 @@ describe('StateProjector', () => {
       })
     })
 
+  describe('keeperHub oracle fallback', () => {
     it('marks status as HELD when score is RED', async () => {
       const mockSpell: SpellRecord = {
         id: 'spell-456',
@@ -259,5 +260,34 @@ describe('StateProjector', () => {
         }),
       })
     })
+
+    it('reports viem-fallback mode when no KeeperHub key is configured', () => {
+      expect(projector.oracleMode).toBe('viem-fallback')
+    })
+
+    it('reads USDS supply via viem when the oracle is unconfigured', async () => {
+      mockClient.readContract.mockResolvedValue(6_000_000_000n * 10n ** 18n)
+      const out = await projector.getUsdsTotalSupplyWithSource()
+      expect(out.value).toBeCloseTo(6_000_000_000, 0)
+      expect(out.viaKeeperHub).toBe(false)
+    })
+
+    it('reads Vat headroom via viem when the oracle is unconfigured', async () => {
+      mockClient.readContract
+        .mockResolvedValueOnce(600_000_000n * 10n ** 45n)
+        .mockResolvedValueOnce(100_000_000n * 10n ** 45n)
+      const out = await projector.getVatDebtHeadroomWithSource()
+      expect(out.value).toBeCloseTo(500_000_000, 0)
+      expect(out.viaKeeperHub).toBe(false)
+    })
+
+    it('reads Chainlink price via viem when the oracle is unconfigured', async () => {
+      const updatedAt = Math.floor(Date.now() / 1000) - 60
+      mockClient.readContract.mockResolvedValue([1n, 250000000000n, 1n, BigInt(updatedAt), 1n])
+      const out = await projector.getChainlinkEthPriceWithSource()
+      expect(out.value.price).toBeCloseTo(2500, 0)
+      expect(out.viaKeeperHub).toBe(false)
+    })
   })
+})
 })

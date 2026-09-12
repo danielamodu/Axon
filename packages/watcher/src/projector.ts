@@ -1,6 +1,7 @@
 import { formatUnits, type Address, type PublicClient } from 'viem'
 import { PrismaClient, type SimulationScore, type SpellRecord } from '@prisma/client'
 import { SPELL_ABI, USDS_ABI, VAT_ABI, CHAINLINK_AGGREGATOR_ABI } from './abi'
+import { KeeperHubOracle } from './oracle'
 import {
   USDS_TOKEN_ADDRESS,
   SKY_VAT_ADDRESS,
@@ -42,6 +43,7 @@ export class StateProjector {
   private client: PublicClient
   private prisma: PrismaClient
   private keeperHubApiKey?: string
+  private oracle: KeeperHubOracle
   private running = false
 
   constructor(
@@ -52,6 +54,12 @@ export class StateProjector {
     this.client = client
     this.prisma = prisma
     this.keeperHubApiKey = keeperHubApiKey ?? process.env.KEEPERHUB_API_KEY
+    this.oracle = new KeeperHubOracle(this.keeperHubApiKey)
+  }
+
+  /** 'keeperhub' when the last projection batch read fully via KH, else 'viem-fallback'. */
+  get oracleMode(): 'keeperhub' | 'viem-fallback' {
+    return this.oracle.keeperHubOracleMode ? 'keeperhub' : 'viem-fallback'
   }
 
   async start(): Promise<void> {
@@ -129,6 +137,7 @@ export class StateProjector {
           score: assessment.score,
           reasons: assessment.reasons,
           projectedAt: state.projectedAt.toISOString(),
+          oracleMode: this.oracleMode,
           gasTrend: state.gasTrend,
           usdsTotalSupply: state.usdsTotalSupply,
           vatHeadroomUsds: state.vatHeadroomUsds,
@@ -163,23 +172,28 @@ export class StateProjector {
   }
 
   /**
-   * Project state inputs: Gas trend, USDS supply, Vat headroom, Chainlink price
+   * Project state inputs: Gas trend, USDS supply, Vat headroom, Chainlink price.
+   * Contract reads go through the KeeperHub oracle first; gas-trend block
+   * data stays on viem (no KeeperHub block-data surface exists).
    */
   async projectChainState(targetTime: Date): Promise<ProjectedChainState> {
-    const [gasTrend, usdsTotalSupply, vatHeadroomUsds, ethOracle] = await Promise.all([
+    const [gasTrend, usds, vat, ethOracle] = await Promise.all([
       this.getGasPriceTrend(),
-      this.getUsdsTotalSupply(),
-      this.getVatDebtHeadroom(),
-      this.getChainlinkEthPrice(),
+      this.getUsdsTotalSupplyWithSource(),
+      this.getVatDebtHeadroomWithSource(),
+      this.getChainlinkEthPriceWithSource(),
     ])
+
+    // Oracle mode is true only when every contract read came via KeeperHub.
+    this.oracle.setBatchMode(usds.viaKeeperHub && vat.viaKeeperHub && ethOracle.viaKeeperHub)
 
     return {
       projectedAt: targetTime,
       gasTrend,
-      usdsTotalSupply,
-      vatHeadroomUsds,
-      ethPriceUsd: ethOracle.price,
-      oracleAgeSeconds: ethOracle.ageSeconds,
+      usdsTotalSupply: usds.value,
+      vatHeadroomUsds: vat.value,
+      ethPriceUsd: ethOracle.value.price,
+      oracleAgeSeconds: ethOracle.value.ageSeconds,
     }
   }
 
@@ -211,26 +225,71 @@ export class StateProjector {
   }
 
   /**
-   * Read USDS total supply from ERC-20 contract
+   * Read USDS total supply — KeeperHub oracle first, viem fallback.
    */
   async getUsdsTotalSupply(): Promise<number> {
+    return (await this.getUsdsTotalSupplyWithSource()).value
+  }
+
+  async getUsdsTotalSupplyWithSource(): Promise<{ value: number; viaKeeperHub: boolean }> {
+    try {
+      const raw = await this.oracle.readContract({
+        address: USDS_TOKEN_ADDRESS,
+        network: 'ethereum',
+        functionName: 'totalSupply',
+        abi: JSON.stringify(USDS_ABI),
+      })
+      if (raw !== null) {
+        return { value: Number(formatUnits(BigInt(raw), 18)), viaKeeperHub: true }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'KeeperHub USDS read threw — viem fallback')
+    }
     try {
       const supply = await this.client.readContract({
         address: USDS_TOKEN_ADDRESS,
         abi: USDS_ABI,
         functionName: 'totalSupply',
       })
-      return Number(formatUnits(supply, 18))
+      return { value: Number(formatUnits(supply, 18)), viaKeeperHub: false }
     } catch (err) {
       logger.error({ err }, 'Failed to read USDS totalSupply')
-      return 0
+      return { value: 0, viaKeeperHub: false }
     }
   }
 
   /**
-   * Read Sky Vat Line (debt ceiling) and total debt, return headroom in USDS
+   * Read Sky Vat Line (debt ceiling) and total debt, return headroom in USDS.
+   * KeeperHub oracle first, viem fallback.
    */
   async getVatDebtHeadroom(): Promise<number> {
+    return (await this.getVatDebtHeadroomWithSource()).value
+  }
+
+  async getVatDebtHeadroomWithSource(): Promise<{ value: number; viaKeeperHub: boolean }> {
+    try {
+      const [lineRaw, debtRaw] = await Promise.all([
+        this.oracle.readContract({
+          address: SKY_VAT_ADDRESS,
+          network: 'ethereum',
+          functionName: 'Line',
+          abi: JSON.stringify(VAT_ABI),
+        }),
+        this.oracle.readContract({
+          address: SKY_VAT_ADDRESS,
+          network: 'ethereum',
+          functionName: 'debt',
+          abi: JSON.stringify(VAT_ABI),
+        }),
+      ])
+      if (lineRaw !== null && debtRaw !== null) {
+        // Vat Line and debt are formatted in RAD (10^45)
+        const headroomRad = BigInt(lineRaw) - BigInt(debtRaw)
+        return { value: Number(formatUnits(headroomRad, 45)), viaKeeperHub: true }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'KeeperHub Vat read threw — viem fallback')
+    }
     try {
       const [line, debt] = await Promise.all([
         this.client.readContract({
@@ -247,17 +306,44 @@ export class StateProjector {
 
       // Vat Line and debt are formatted in RAD (10^45)
       const headroomRad = line - debt
-      return Number(formatUnits(headroomRad, 45))
+      return { value: Number(formatUnits(headroomRad, 45)), viaKeeperHub: false }
     } catch (err) {
       logger.error({ err }, 'Failed to read Sky Vat debt ceiling')
-      return 0
+      return { value: 0, viaKeeperHub: false }
     }
   }
 
   /**
-   * Read Chainlink ETH/USD oracle price and age
+   * Read Chainlink ETH/USD oracle price and age.
+   * KeeperHub oracle first, viem fallback.
    */
   async getChainlinkEthPrice(): Promise<{ price: number; ageSeconds: number }> {
+    return (await this.getChainlinkEthPriceWithSource()).value
+  }
+
+  async getChainlinkEthPriceWithSource(): Promise<{
+    value: { price: number; ageSeconds: number }
+    viaKeeperHub: boolean
+  }> {
+    try {
+      // latestRoundData -> (roundId, answer, startedAt, updatedAt, answeredInRound)
+      const tuple = await this.oracle.readContractTuple({
+        address: CHAINLINK_ETH_USD_ADDRESS,
+        network: 'ethereum',
+        functionName: 'latestRoundData',
+        abi: JSON.stringify(CHAINLINK_AGGREGATOR_ABI),
+      })
+      if (tuple && tuple.length >= 4) {
+        const price = Number(tuple[1]) / 1e8
+        const updatedAt = new Date(Number(tuple[3]) * 1000)
+        const ageSeconds = Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 1000))
+        if (Number.isFinite(price) && price > 0) {
+          return { value: { price, ageSeconds }, viaKeeperHub: true }
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'KeeperHub Chainlink read threw — viem fallback')
+    }
     try {
       const roundData = await this.client.readContract({
         address: CHAINLINK_ETH_USD_ADDRESS,
@@ -269,10 +355,10 @@ export class StateProjector {
       const updatedAt = new Date(Number(roundData[3]) * 1000)
       const ageSeconds = Math.max(0, Math.floor((Date.now() - updatedAt.getTime()) / 1000))
 
-      return { price, ageSeconds }
+      return { value: { price, ageSeconds }, viaKeeperHub: false }
     } catch (err) {
       logger.error({ err }, 'Failed to read Chainlink ETH/USD feed')
-      return { price: 0, ageSeconds: Infinity }
+      return { value: { price: 0, ageSeconds: Infinity }, viaKeeperHub: false }
     }
   }
 
