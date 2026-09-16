@@ -72,6 +72,24 @@ describe('ConflictDetector', () => {
       expect(fp.has('stability_fee')).toBe(true)
       expect(fp.has('debt_ceiling')).toBe(true)
     })
+
+    it('does NOT trigger on bare words without governance context', () => {
+      expect(extractParameterFingerprint('Keep everything in line for launch').has('debt_ceiling')).toBe(false)
+      expect(extractParameterFingerprint('Deploy the yoga mat contract').has('collateral_ratio')).toBe(false)
+      expect(extractParameterFingerprint('Team is off duty this week').has('stability_fee')).toBe(false)
+    })
+
+    it('indexes action targets without treating them as parameter overlap', () => {
+      const fpA = extractParameterFingerprint('noop', [
+        { target: '0x1111111111111111111111111111111111111111', signature: 'cast()', description: 'noop' },
+      ])
+      const fpB = extractParameterFingerprint('noop', [
+        { target: '0x2222222222222222222222222222222222222222', signature: 'cast()', description: 'noop' },
+      ])
+      expect(fpA.has('target:0x1111111111111111111111111111111111111111')).toBe(true)
+      // Same sig/target shape alone must not count as overlap — verified in detectConflicts
+      expect([...fpA].filter((p) => !p.startsWith('target:') && !p.startsWith('sig:') && fpB.has(p)).length).toBe(0)
+    })
   })
 
   describe('detectConflicts — PARAMETER_OVERLAP', () => {
@@ -143,7 +161,7 @@ describe('ConflictDetector', () => {
   })
 
   describe('detectConflicts — RACE_CONDITION', () => {
-    it('flags RACE_CONDITION when two READY spells execute within 2 hours of each other', () => {
+    it('does NOT block on timing alone — disjoint params within 2h is WARNING only', () => {
       const spellA = createMockSpell({
         spellAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         actions: [{ target: '0x1', signature: 'cast()', calldata: '0x', description: 'DAI savings rate' }],
@@ -157,10 +175,31 @@ describe('ConflictDetector', () => {
 
       const result = detectConflicts(spellA, [spellB])
 
-      expect(result.hasConflict).toBe(true)
+      // Timing proximity alone must not deadlock the queue
+      expect(result.hasConflict).toBe(false)
       const race = result.conflicts.find((c) => c.conflictType === 'RACE_CONDITION')
       expect(race).toBeDefined()
-      expect(race?.reason).toContain('within 2 hours')
+      expect(race?.severity).toBe('WARNING')
+      expect(result.warnings.length).toBe(1)
+    })
+
+    it('escalates RACE to BLOCKING when the pair also shares parameters', () => {
+      const spellA = createMockSpell({
+        spellAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        actions: [{ target: '0x1', signature: 'cast()', calldata: '0x', description: 'Update USDS stability fee' }],
+        nextExecutionWindow: new Date('2026-09-08T15:00:00.000Z'),
+      })
+      const spellB = createMockSpell({
+        spellAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        actions: [{ target: '0x2', signature: 'cast()', calldata: '0x', description: 'Lower USDS stability fee' }],
+        nextExecutionWindow: new Date('2026-09-08T15:45:00.000Z'),
+      })
+
+      const result = detectConflicts(spellA, [spellB])
+
+      expect(result.hasConflict).toBe(true)
+      const race = result.conflicts.find((c) => c.conflictType === 'RACE_CONDITION')
+      expect(race?.severity).toBe('BLOCKING')
     })
 
     it('does NOT flag RACE_CONDITION when execution windows are spaced > 2 hours apart', () => {

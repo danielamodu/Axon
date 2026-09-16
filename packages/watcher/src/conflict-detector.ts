@@ -3,16 +3,21 @@ import { logger } from './logger'
 
 export type ConflictType = 'PARAMETER_OVERLAP' | 'ORDERING_DEPENDENCY' | 'RACE_CONDITION'
 
+export type ConflictSeverity = 'BLOCKING' | 'WARNING'
+
 export interface ConflictRecord {
   conflictType: ConflictType
   conflictingSpellAddress: string
   reason: string
+  severity: ConflictSeverity
   details?: Record<string, unknown>
 }
 
 export interface ConflictCheckResult {
   hasConflict: boolean
   conflicts: ConflictRecord[]
+  /** Non-blocking timing warnings (RACE_CONDITION alone). Never blocks execution. */
+  warnings: ConflictRecord[]
   fingerprint: string[]
 }
 
@@ -21,19 +26,29 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 const CONFLICT_POLL_INTERVAL_MS = 30_000
 
 /**
- * Extracts normalized parameter fingerprints from a spell's description and actions
+ * Extracts normalized parameter fingerprints from a spell's description and actions.
+ * Tightened to avoid bare-word false positives (`line`, `mat`, `duty` alone
+ * no longer trigger — they require governance context).
  */
 export function extractParameterFingerprint(description: string, actions?: unknown): Set<string> {
   const fingerprint = new Set<string>()
   const text = (description || '').toLowerCase()
 
-  // 1. Stability fee / duty
-  if (text.includes('stability fee') || /\bduty\b/.test(text)) {
+  // 1. Stability fee / duty — `duty` alone is Maker-specific, but ignore
+  // common English "off duty" unless fee context is present.
+  if (text.includes('stability fee')) {
+    fingerprint.add('stability_fee')
+  } else if (/\bduty\b/.test(text) && !/\boff[-\s]?duty\b/.test(text)) {
     fingerprint.add('stability_fee')
   }
 
-  // 2. Debt ceiling / line
-  if (text.includes('debt ceiling') || /\bline\b/.test(text)) {
+  // 2. Debt ceiling / Vat Line — bare "line" no longer triggers (was matching
+  // "in line", "front line", etc.). Require debt/vat context or Line( call.
+  if (
+    text.includes('debt ceiling') ||
+    (text.includes('vat') && text.includes('line')) ||
+    /\bline\s*\(/.test(text)
+  ) {
     fingerprint.add('debt_ceiling')
   }
 
@@ -57,8 +72,19 @@ export function extractParameterFingerprint(description: string, actions?: unkno
     fingerprint.add('token_dai')
   }
 
-  // 7. Collateral ratio / liquidation ratio / mat
-  if (/\bmat\b/.test(text) || text.includes('collateral ratio') || text.includes('liquidation ratio')) {
+  // 7. Collateral ratio / liquidation ratio / mat — bare "mat" no longer
+  // triggers alone (matches "mat", yoga mats, etc.). Require collateral context.
+  if (text.includes('collateral ratio') || text.includes('liquidation ratio')) {
+    fingerprint.add('collateral_ratio')
+  } else if (
+    /\bmat\b/.test(text) &&
+    (text.includes('collateral') ||
+      text.includes('liquidation') ||
+      text.includes('ilk') ||
+      text.includes('duty') ||
+      text.includes('ceiling') ||
+      /\beth-|\bwbtc-|\busdc-|\bwsteth-/.test(text))
+  ) {
     fingerprint.add('collateral_ratio')
   }
 
@@ -70,12 +96,19 @@ export function extractParameterFingerprint(description: string, actions?: unkno
     }
   }
 
-  // Also check action targets if available
+  // Also check action targets if available — recurse descriptions and index
+  // target addresses + signatures so overlaps can be attributed precisely.
   if (Array.isArray(actions)) {
     for (const action of actions) {
       if (typeof action?.description === 'string') {
         const subFingerprint = extractParameterFingerprint(action.description)
         subFingerprint.forEach((f) => fingerprint.add(f))
+      }
+      if (typeof action?.target === 'string' && action.target.startsWith('0x')) {
+        fingerprint.add(`target:${action.target.toLowerCase()}`)
+      }
+      if (typeof action?.signature === 'string' && action.signature.length > 0) {
+        fingerprint.add(`sig:${action.signature.toLowerCase()}`)
       }
     }
   }
@@ -117,12 +150,17 @@ export function detectConflicts(
     }
     const otherFingerprint = extractParameterFingerprint(otherDesc, other.actions)
 
-    // Conflict Type 1: PARAMETER_OVERLAP
-    const overlappingParams = [...combinedCandidateFingerprint].filter((p) => otherFingerprint.has(p))
+    // Conflict Type 1: PARAMETER_OVERLAP (BLOCKING)
+    // Ignore pure address/signature tags — overlap must be on a governance
+    // parameter (stability_fee, debt_ceiling, ilk:*, etc.).
+    const overlappingParams = [...combinedCandidateFingerprint].filter(
+      (p) => !p.startsWith('target:') && !p.startsWith('sig:') && otherFingerprint.has(p)
+    )
     if (overlappingParams.length > 0) {
       conflicts.push({
         conflictType: 'PARAMETER_OVERLAP',
         conflictingSpellAddress: other.spellAddress,
+        severity: 'BLOCKING',
         reason: `Parameter overlap detected: both spells modify [${overlappingParams.join(', ')}]`,
         details: { overlappingParams, otherStatus: other.status },
       })
@@ -137,6 +175,7 @@ export function detectConflicts(
       conflicts.push({
         conflictType: 'ORDERING_DEPENDENCY',
         conflictingSpellAddress: other.spellAddress,
+        severity: 'BLOCKING',
         reason: `Ordering dependency: Candidate spell references address of spell ${other.spellAddress} — must sequence after it`,
         details: { referenceDirection: 'candidate_references_other' },
       })
@@ -144,37 +183,46 @@ export function detectConflicts(
       conflicts.push({
         conflictType: 'ORDERING_DEPENDENCY',
         conflictingSpellAddress: other.spellAddress,
+        severity: 'BLOCKING',
         reason: `Ordering dependency: Active spell ${other.spellAddress} references this candidate spell — must be sequenced`,
         details: { referenceDirection: 'other_references_candidate' },
       })
     }
 
-    // Conflict Type 3: RACE_CONDITION
-    // Only applies to active concurrent spells (READY or EXECUTING)
+    // Conflict Type 3: RACE_CONDITION (WARNING only — never blocks alone).
+    // Two READY spells close in time is normal governance, not a conflict.
+    // It escalates to BLOCKING only when paired with a parameter overlap
+    // on the same pair (recorded via details.sharesParameters).
     if (other.status === 'READY' || other.status === 'EXECUTING') {
       const timeDiffMs = Math.abs(
         candidate.nextExecutionWindow.getTime() - other.nextExecutionWindow.getTime()
       )
       if (timeDiffMs <= TWO_HOURS_MS) {
+        const sharesParameters = overlappingParams.length > 0
         conflicts.push({
           conflictType: 'RACE_CONDITION',
           conflictingSpellAddress: other.spellAddress,
-          reason: `Race condition: Both spells are scheduled to execute within 2 hours of each other (${Math.round(
-            timeDiffMs / 60000
-          )} minutes apart)`,
+          severity: sharesParameters ? 'BLOCKING' : 'WARNING',
+          reason: sharesParameters
+            ? `Race condition: overlapping spells scheduled ${Math.round(timeDiffMs / 60000)} minutes apart — sequence manually`
+            : `Timing proximity (WARNING only): spells ${Math.round(timeDiffMs / 60000)} minutes apart but touch disjoint parameters — safe to proceed`,
           details: {
             timeDiffMinutes: Math.round(timeDiffMs / 60000),
             candidateWindow: candidate.nextExecutionWindow.toISOString(),
             otherWindow: other.nextExecutionWindow.toISOString(),
+            sharesParameters,
           },
         })
       }
     }
   }
 
+  const blocking = conflicts.filter((c) => c.severity === 'BLOCKING')
+  const warnings = conflicts.filter((c) => c.severity === 'WARNING')
   return {
-    hasConflict: conflicts.length > 0,
+    hasConflict: blocking.length > 0,
     conflicts,
+    warnings,
     fingerprint: Array.from(combinedCandidateFingerprint),
   }
 }
@@ -299,8 +347,9 @@ export class ConflictDetector {
         {
           spellAddress: candidate.spellAddress,
           fingerprint: result.fingerprint,
+          warnings: result.warnings.length,
         },
-        '✅ Conflict check clear — spell remains READY for execution'
+        '✅ Conflict check clear (warnings preserved) — spell remains READY for execution'
       )
 
       const updated = await this.prisma.spellRecord.update({
@@ -312,6 +361,7 @@ export class ConflictDetector {
             evaluatedAt: now.toISOString(),
             fingerprint: result.fingerprint,
             conflicts: [],
+            warnings: result.warnings,
           }),
         },
       })
