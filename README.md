@@ -318,6 +318,14 @@ axon/
 
 ---
 
+## Deployments
+
+The dashboard (API + UI) runs as one container on Railway with autodeploys
+from `main`. Push → build (`Dockerfile`) → healthcheck (`/api/health`).
+Infra lives in `.railway/railway.ts`; secrets stay in Railway, never in git.
+
+Live: `https://axon-production-d089.up.railway.app`
+
 ## License
 
 MIT
