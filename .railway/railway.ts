@@ -36,6 +36,7 @@ export default defineRailway(() => {
       DEPLOYER_PRIVATE_KEY: preserve(),
       DISCORD_WEBHOOK_URL: preserve(),
       AXON_WEBHOOK_BASE_URL: preserve(),
+      KEEPERHUB_API_KEY: preserve(),
       PORT: "3001",
       WEBHOOK_SERVER_PORT: "3001",
     },
