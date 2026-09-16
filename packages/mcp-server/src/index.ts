@@ -156,20 +156,35 @@ export async function authenticateMcp(reqApiKey?: string): Promise<AuthResult> {
   }
 
   try {
+    const { createHash } = await import('node:crypto')
+    const hashed = `axon_live_${createHash('sha256').update(apiKey, 'utf8').digest('hex').slice(0, 32)}`
     const org = await prisma.organisation.findUnique({
-      where: { apiKey },
+      where: { apiKey: hashed },
     })
 
-    if (!org) {
+    if (org) {
       return {
-        authorized: false,
-        error: 'Unauthorized. Invalid AXON_API_KEY.',
+        authorized: true,
+        org: { id: org.id, name: org.name, apiKey: org.apiKey },
+      }
+    }
+
+    // Legacy v1 plaintext rows only — v2 stored values are never bearer.
+    if (apiKey !== hashed) {
+      const legacy = await prisma.organisation.findUnique({
+        where: { apiKey },
+      })
+      if (legacy && (legacy as { apiKeyVersion?: number }).apiKeyVersion !== 2) {
+        return {
+          authorized: true,
+          org: { id: legacy.id, name: legacy.name, apiKey: legacy.apiKey },
+        }
       }
     }
 
     return {
-      authorized: true,
-      org: { id: org.id, name: org.name, apiKey: org.apiKey },
+      authorized: false,
+      error: 'Unauthorized. Invalid AXON_API_KEY.',
     }
   } catch (err: any) {
     return {
