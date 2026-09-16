@@ -928,6 +928,7 @@ export function createApiRouter(): Router {
         data: {
           name: (orgName as string).trim(),
           apiKey: hashApiKey(apiKey),
+          apiKeyVersion: 2,
           email: normalizedEmail,
           passwordHash,
           emailVerified: false,
@@ -999,9 +1000,14 @@ export function createApiRouter(): Router {
         if (!ok) {
           return res.status(401).json({ error: "Unauthorized. Invalid email or password." });
         }
-        // Stored value may be a hash — accepted as bearer via findOrgByToken's
-        // direct-match arm.
-        return res.json({ apiKey: org.apiKey, orgId: org.id, orgName: org.name });
+        // Rotate on password login: the stored value is a hash (v2) and can
+        // never be recovered, so issue a fresh working key each login.
+        const freshKey = generateApiKeyValue();
+        await db.organisation.update({
+          where: { id: org.id },
+          data: { apiKey: hashApiKey(freshKey), apiKeyVersion: 2 },
+        });
+        return res.json({ apiKey: freshKey, orgId: org.id, orgName: org.name });
       }
 
       return res.status(400).json({ error: "Provide email+password or apiKey" });

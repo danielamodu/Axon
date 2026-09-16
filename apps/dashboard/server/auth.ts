@@ -47,11 +47,9 @@ export function hashApiKey(key: string): string {
 }
 
 /**
- * Find an org by bearer token. Accepts:
- *  1. plaintext keys (hashed then matched — current scheme),
- *  2. legacy plaintext rows (direct match, migration window),
- *  3. stored hashes presented as bearer (direct match — e.g. after
- *     email+password login returns the stored value).
+ * Find an org by bearer token. v2 (hashed) rows match by hash only — the
+ * stored value is never valid bearer. v1 (legacy plaintext) rows still
+ * match raw during the migration window.
  */
 export async function findOrgByToken(db: any, token: string) {
   const trimmed = token.trim();
@@ -61,11 +59,12 @@ export async function findOrgByToken(db: any, token: string) {
     const byHash = await db.organisation.findUnique({ where: { apiKey: hashed } });
     if (byHash) return byHash;
   } catch {
-    // fall through to direct match
+    // fall through to legacy match
   }
   if (trimmed !== hashed) {
     try {
-      return await db.organisation.findUnique({ where: { apiKey: trimmed } });
+      const legacy = await db.organisation.findUnique({ where: { apiKey: trimmed } });
+      if (legacy && legacy.apiKeyVersion !== 2) return legacy;
     } catch {
       return null;
     }
