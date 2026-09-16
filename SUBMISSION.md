@@ -64,9 +64,9 @@ Authored and executed by an AI agent over KeeperHub's MCP
 
 ## What still breaks or is unfinished? (candid)
 
-- The configured KeeperHub key is read-scoped: workflow creation returns
-  `unauthorized`, so Axon-built workflows currently fail closed instead of
-  executing. Direct execution through KeeperHub works (see proof tx above).
+- The first key was read-scoped (workflow creation `unauthorized`); replaced
+  with a write-scoped key — governor templates now publish on boot and direct
+  execution writes proofs (see tx above).
 - Conflict fingerprints are keyword heuristics, not decoded-calldata analysis.
 - The projector assesses current state + gas slope; it does not time-travel to
   the execution window.

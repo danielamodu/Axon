@@ -355,11 +355,10 @@ healthcheck. Infra lives in `.railway/railway.ts`; secrets stay in Railway, neve
 | `Axon` | Dashboard UI + API | `https://axon-production-d089.up.railway.app` | `/api/health` |
 | `AxonWatcher` | Pipeline: watch, project, conflict-check, execute, webhooks | `https://axonwatcher-production.up.railway.app` | `/health` |
 
-> The watcher runs **effectively observe-only**: the configured KeeperHub key is
-> read-scoped, so workflow creation fails closed (`unauthorized`) and nothing
-> executes onchain — watching, simulation, scoring, and conflict detection all
-> run for real. Going live = one key with workflow:create scope + a funded
-> KeeperHub wallet.
+> The watcher runs **fully live**: the configured KeeperHub key carries write
+> scope — workflow creation succeeds (governor templates published on boot),
+> direct execution writes proofs, reads go through KeeperHub first. Nothing is
+> mocked: the only thing that hasn't happened yet is a real mainnet spell.
 
 ## License
 
