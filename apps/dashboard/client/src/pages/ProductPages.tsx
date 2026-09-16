@@ -622,6 +622,13 @@ function QueueTable({ onConflict }: { onConflict: (spell: any) => void }) {
                       <button className="conflict-button" onClick={() => onConflict(row)}>
                         <AlertTriangle size={13} /> Conflict
                       </button>
+                    ) : row.warningCount > 0 ? (
+                      <span
+                        className="clear-mark"
+                        title={`Timing advisories (non-blocking): ${(row.warnings || []).join(" | ")}`}
+                      >
+                        <AlertTriangle size={13} /> Clear · {row.warningCount} advisor{row.warningCount === 1 ? "y" : "ies"}
+                      </span>
                     ) : (
                       <span className="clear-mark">
                         <Check size={13} /> Clear
@@ -676,13 +683,13 @@ function HistoryTable() {
       <div className="panel-head">
         <div>
           <h2>Execution history</h2>
-          <p>Completed KeeperHub operations verified on-chain</p>
+          <p>Completed operations — simulations are marked, not verified on-chain</p>
         </div>
         <button
           className="text-button"
           onClick={() => {
             if (history.length === 0) return;
-            const csv = history.map((h) => `${h.spellAddress || h.spell},"${h.description}",${h.executedAt},${h.gasUsed},${h.score},${h.txHash}`).join("\n");
+            const csv = history.map((h) => `${h.spellAddress || h.spell},"${h.description}",${h.executedAt},${h.gasUsed},${h.score},${h.txHash || ""}`).join("\n");
             const blob = new Blob([`Spell,Description,Executed At,Gas Used,Score,TxHash\n${csv}`], { type: "text/csv" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
@@ -766,14 +773,23 @@ function HistoryTable() {
                     </div>
                   </td>
                   <td>
-                    <a
-                      className="table-link"
-                      href={`https://basescan.org/tx/${row.txHash || ""}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Registry proof <ExternalLink size={12} />
-                    </a>
+                    {row.keeperHubStatus === "dry-run" || !row.txHash ? (
+                      <span
+                        className="muted-cell"
+                        title="Simulation only — no transaction was broadcast, no registry proof exists"
+                      >
+                        Simulated — no proof
+                      </span>
+                    ) : (
+                      <a
+                        className="table-link"
+                        href={`https://basescan.org/tx/${row.txHash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Registry proof <ExternalLink size={12} />
+                      </a>
+                    )}
                   </td>
                 </tr>
               ))
@@ -1702,6 +1718,7 @@ export function ExecutionDetail() {
   const usdsSupply = record?.usdsSupply || "—";
   const status = record?.status || "—";
   const simScore = record?.simulationScore || "—";
+  const isDryRun = record?.keeperHubStatus === "dry-run";
 
   let parsedAuditLogs: any[] = [];
   if (record?.keeperHubAuditLog) {
@@ -1725,11 +1742,16 @@ export function ExecutionDetail() {
         </Link>
         <div className="execution-detail-head">
           <div>
-            <span className="app-eyebrow">Verified on-chain · Ethereum mainnet</span>
+            <span className="app-eyebrow">
+              {isDryRun ? "Simulated execution · no onchain transaction" : "Verified on-chain · Ethereum mainnet"}
+            </span>
             <h1>{description}</h1>
             <div className="execution-identifiers">
               <CopyValue value={spellAddress}>{shortSpell}</CopyValue>
-              <StatusBadge status={status} tone="positive" />
+              <StatusBadge
+                status={isDryRun ? `${status} · SIMULATED` : status}
+                tone={isDryRun ? "warning" : "positive"}
+              />
             </div>
           </div>
           <div className="head-actions">
@@ -1763,13 +1785,13 @@ export function ExecutionDetail() {
         <div className="execution-detail-grid">
           <div className="execution-detail-main">
             <div className="panel snapshot-panel">
-              <div className="panel-head">
-                <div>
-                  <h2>State snapshot</h2>
-                  <p>Chain conditions verified at execution</p>
-                </div>
-                <span className="snapshot-time">Confirmed</span>
+            <div className="panel-head">
+              <div>
+                <h2>State snapshot</h2>
+                <p>{isDryRun ? "Chain conditions at simulation time" : "Chain conditions verified at execution"}</p>
               </div>
+              <span className="snapshot-time">{isDryRun ? "Simulated" : "Confirmed"}</span>
+            </div>
               <div className="snapshot-grid">
                 <div>
                   <span>Gas used</span>
@@ -1799,13 +1821,13 @@ export function ExecutionDetail() {
               </div>
             </div>
             <div className="panel timeline-panel">
-              <div className="panel-head">
-                <div>
-                  <h2>Execution lifecycle</h2>
-                  <p>Verified on-chain execution pipeline</p>
-                </div>
-                <StatusBadge status="Confirmed" tone="positive" />
+            <div className="panel-head">
+              <div>
+                <h2>Execution lifecycle</h2>
+                <p>{isDryRun ? "Simulation pipeline — nothing broadcast" : "Verified on-chain execution pipeline"}</p>
               </div>
+              <StatusBadge status={isDryRun ? "Simulated" : "Confirmed"} tone={isDryRun ? "warning" : "positive"} />
+            </div>
               <div className="detail-timeline">
                 {[
                   ["Governance passed", record?.calledAt ? new Date(record.calledAt).toUTCString().slice(17, 25) + " UTC" : "15:38:14 UTC", "Proposal reached quorum on Ethereum Chief", "done"],
@@ -1814,8 +1836,8 @@ export function ExecutionDetail() {
                   ["Conflict check CLEAR", "Conflict detector", "Checked against active pipeline queue", "done"],
                   ["x402 fee settled", record?.x402SettledAt ? new Date(record.x402SettledAt).toUTCString().slice(17, 25) + " UTC" : "15:38:40 UTC", "0.05 USDC settled on Base via x402 gateway", "done"],
                   ["Execution triggered", "KeeperHub dispatch (9 nodes)", "Autonomous execution job submitted with notification nodes", "done"],
-                  ["Onchain confirmed", record?.executedAt ? new Date(record.executedAt).toUTCString().slice(17, 25) + " UTC" : "15:39:01 UTC", "Transaction executed and verified on Ethereum", "done"],
-                  ["Registry written on Base", "AxonRegistry #1", "Immutable execution record written to Base with KH execution ID", "done"],
+                  ["Onchain confirmed", record?.executedAt ? new Date(record.executedAt).toUTCString().slice(17, 25) + " UTC" : "15:39:01 UTC", isDryRun ? "Skipped — simulation only, nothing broadcast" : "Transaction executed and verified on Ethereum", "done"],
+                  ["Registry written on Base", "AxonRegistry #1", isDryRun ? "Skipped — no proof for simulations" : "Immutable execution record written to Base with KH execution ID", "done"],
                 ].map(([label, time, desc], index) => (
                   <div className="detail-timeline-row" key={label}>
                     <span className="timeline-step-line" />

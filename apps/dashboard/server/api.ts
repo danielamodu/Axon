@@ -411,6 +411,25 @@ export function createApiRouter(): Router {
             ? "danger"
             : "neutral";
 
+        // Surface non-blocking timing advisories (RACE_CONDITION warnings)
+        // separately from real CONFLICTs so the UI never implies a block.
+        let warnings: string[] = [];
+        try {
+          const detail = r.conflictDetail
+            ? typeof r.conflictDetail === "string"
+              ? JSON.parse(r.conflictDetail)
+              : r.conflictDetail
+            : null;
+          const list = detail?.warnings;
+          if (Array.isArray(list)) {
+            warnings = list
+              .map((w: any) => w?.reason || w?.conflictType)
+              .filter((x: any) => typeof x === "string" && x.length > 0);
+          }
+        } catch {
+          warnings = [];
+        }
+
         return {
           id: r.id,
           spell: shortAddr,
@@ -424,6 +443,8 @@ export function createApiRouter(): Router {
           conflict: r.conflictStatus === "CONFLICT" ? "CONFLICT" : "CLEAR",
           conflictStatus: r.conflictStatus || "CLEAR",
           conflictDetail: r.conflictDetail || null,
+          warnings,
+          warningCount: warnings.length,
         };
       });
 
