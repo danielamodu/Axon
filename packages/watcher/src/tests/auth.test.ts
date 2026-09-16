@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { validateApiKey, requireAuth, generateApiKey, rotateApiKey } from '../auth'
+import { validateApiKey, requireAuth, generateApiKey, rotateApiKey, hashApiKey } from '../auth'
 import type { PrismaClient } from '@prisma/client'
 
 describe('Auth Layer', () => {
@@ -27,7 +27,7 @@ describe('Auth Layer', () => {
       const result = await validateApiKey('axon_live_invalid', mockPrisma as unknown as PrismaClient)
       expect(result).toBeNull()
       expect(mockPrisma.organisation.findUnique).toHaveBeenCalledWith({
-        where: { apiKey: 'axon_live_invalid' },
+        where: { apiKey: hashApiKey('axon_live_invalid') },
       })
     })
 
@@ -35,7 +35,7 @@ describe('Auth Layer', () => {
       const mockOrg = {
         id: 'org_123',
         name: 'Sky Ecosystem',
-        apiKey: 'axon_live_valid123',
+        apiKey: hashApiKey('axon_live_valid123'),
         email: 'ops@sky.money',
         discordWebhook: null,
         createdAt: new Date(),
@@ -44,6 +44,15 @@ describe('Auth Layer', () => {
 
       const result = await validateApiKey('axon_live_valid123', mockPrisma as unknown as PrismaClient)
       expect(result).toEqual(mockOrg)
+    })
+
+    it('falls back to legacy plaintext rows during migration', async () => {
+      const legacyOrg = { id: 'org_legacy', name: 'Legacy', apiKey: 'axon_live_plain' }
+      mockPrisma.organisation.findUnique
+        .mockResolvedValueOnce(null) // hash miss
+        .mockResolvedValueOnce(legacyOrg) // plaintext hit
+      const result = await validateApiKey('axon_live_plain', mockPrisma as unknown as PrismaClient)
+      expect(result).toEqual(legacyOrg)
     })
   })
 
@@ -72,7 +81,7 @@ describe('Auth Layer', () => {
   })
 
   describe('generateApiKey', () => {
-    it('creates an organisation with a valid axon_live_ key', async () => {
+    it('creates an organisation with a hashed key but returns plaintext once', async () => {
       mockPrisma.organisation.create.mockImplementation(async ({ data }: any) => ({
         id: 'org_created_1',
         ...data,
@@ -88,13 +97,15 @@ describe('Auth Layer', () => {
       expect(result.apiKey).toMatch(/^axon_live_[a-f0-9]{32}$/)
       expect(result.org.name).toBe('Aave Governance')
       expect(result.org.email).toBe('admin@aave.com')
+      // Stored value is the hash, never the returned plaintext
       expect(mockPrisma.organisation.create).toHaveBeenCalledWith({
         data: {
           name: 'Aave Governance',
-          apiKey: result.apiKey,
+          apiKey: hashApiKey(result.apiKey),
           email: 'admin@aave.com',
         },
       })
+      expect(result.org.apiKey).not.toBe(result.apiKey)
     })
 
     it('throws if organisation name is empty', async () => {
@@ -105,7 +116,7 @@ describe('Auth Layer', () => {
   })
 
   describe('rotateApiKey', () => {
-    it('updates organisation with a new key', async () => {
+    it('updates organisation with a hashed key', async () => {
       mockPrisma.organisation.update.mockImplementation(async ({ where, data }: any) => ({
         id: where.id,
         name: 'Uniswap Labs',
@@ -120,7 +131,7 @@ describe('Auth Layer', () => {
       expect(result.org.id).toBe('org_uni')
       expect(mockPrisma.organisation.update).toHaveBeenCalledWith({
         where: { id: 'org_uni' },
-        data: { apiKey: result.apiKey },
+        data: { apiKey: hashApiKey(result.apiKey) },
       })
     })
   })

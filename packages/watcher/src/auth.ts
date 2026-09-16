@@ -13,8 +13,19 @@ function getPrisma(client?: PrismaClient): PrismaClient {
 }
 
 /**
+ * API keys are never stored in plaintext. `hashApiKey` is deterministic so
+ * lookups stay a single indexed `findUnique`; the plaintext is returned once
+ * at creation/rotation and never persisted.
+ */
+export function hashApiKey(key: string): string {
+  const digest = crypto.createHash('sha256').update(key.trim(), 'utf8').digest('hex')
+  return `axon_live_${digest.slice(0, 32)}`
+}
+
+/**
  * Validates an Axon API key.
- * Looks up Organisation by apiKey. Returns the Organisation record or null if not found.
+ * Looks up Organisation by hashed key first, falling back to a legacy
+ * plaintext row (migration window for pre-hash deployments).
  */
 export async function validateApiKey(
   key: string,
@@ -25,11 +36,22 @@ export async function validateApiKey(
   }
 
   const prisma = getPrisma(prismaClient)
+  const trimmed = key.trim()
+  const hashed = hashApiKey(trimmed)
   const org = await prisma.organisation.findUnique({
-    where: { apiKey: key.trim() },
+    where: { apiKey: hashed },
   })
+  if (org) return org
 
-  return org
+  // Legacy fallback: rows created before hashing. Remove after migration.
+  if (trimmed !== hashed) {
+    const legacy = await prisma.organisation.findUnique({
+      where: { apiKey: trimmed },
+    })
+    if (legacy) return legacy
+  }
+
+  return null
 }
 
 /**
@@ -49,7 +71,7 @@ export async function requireAuth(
 
 /**
  * Generates a new unique API key and creates an Organisation record.
- * Returns the created Organisation and the generated API key.
+ * Stores only the hash; returns the plaintext once for the operator to save.
  */
 export async function generateApiKey(
   orgName: string,
@@ -67,7 +89,7 @@ export async function generateApiKey(
   const org = await prisma.organisation.create({
     data: {
       name: orgName.trim(),
-      apiKey,
+      apiKey: hashApiKey(apiKey),
       email: email ? email.trim() : null,
     },
   })
@@ -77,7 +99,7 @@ export async function generateApiKey(
 
 /**
  * Rotates an API key for an existing Organisation by ID.
- * Returns the updated Organisation and the new API key.
+ * Stores only the hash; returns the plaintext once.
  */
 export async function rotateApiKey(
   orgId: string,
@@ -89,7 +111,7 @@ export async function rotateApiKey(
 
   const org = await prisma.organisation.update({
     where: { id: orgId },
-    data: { apiKey },
+    data: { apiKey: hashApiKey(apiKey) },
   })
 
   return { org, apiKey }
