@@ -1,0 +1,14 @@
+# Railway — Axon dashboard (full product: API + UI in one service).
+# Connect repo, set env vars (see .env.example — at minimum DATABASE_URL
+# and ETH_RPC_URL), deploy. Schema: run `npm run db:push` once from local
+# with the same DATABASE_URL before first boot.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "npm --workspace=@axon/dashboard run start"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
