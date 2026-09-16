@@ -7,8 +7,10 @@ import { mainnet } from "viem/chains";
 import {
   buildProtocolId,
   comparePassword,
+  findOrgByToken,
   generateApiKeyValue,
   getBearerToken,
+  hashApiKey,
   hashPassword,
   isValidAddress,
   maskApiKey,
@@ -166,9 +168,7 @@ async function resolveOrg(req: Request) {
 
   if (token) {
     try {
-      const org = await db.organisation.findUnique({
-        where: { apiKey: token },
-      });
+      const org = await findOrgByToken(db, token);
       if (org) return org;
     } catch {
       // ignore
@@ -194,6 +194,11 @@ async function resolveOrg(req: Request) {
 
 export function createApiRouter(): Router {
   const router = Router();
+
+  // 0. GET /api/health — DB-free liveness probe for container healthchecks
+  router.get("/health", (_req: Request, res: Response) => {
+    res.json({ ok: true, service: "axon-dashboard", time: new Date().toISOString() });
+  });
 
   // 1. GET /api/auth/verify
   router.get("/auth/verify", async (req: Request, res: Response) => {
@@ -922,7 +927,7 @@ export function createApiRouter(): Router {
       const org = await db.organisation.create({
         data: {
           name: (orgName as string).trim(),
-          apiKey,
+          apiKey: hashApiKey(apiKey),
           email: normalizedEmail,
           passwordHash,
           emailVerified: false,
@@ -971,13 +976,14 @@ export function createApiRouter(): Router {
       const db = getPrisma();
 
       if (typeof apiKey === "string" && apiKey.trim().length > 0) {
-        const org = await db.organisation.findUnique({
-          where: { apiKey: apiKey.trim() },
-        });
+        const presented = apiKey.trim();
+        const org = await findOrgByToken(db, presented);
         if (!org) {
           return res.status(401).json({ error: "Unauthorized. Invalid API key." });
         }
-        return res.json({ apiKey: org.apiKey, orgId: org.id, orgName: org.name });
+        // Echo the presented credential (not the stored hash) so the client
+        // keeps working bearer material.
+        return res.json({ apiKey: presented, orgId: org.id, orgName: org.name });
       }
 
       if (typeof email === "string" && typeof password === "string") {
@@ -993,6 +999,8 @@ export function createApiRouter(): Router {
         if (!ok) {
           return res.status(401).json({ error: "Unauthorized. Invalid email or password." });
         }
+        // Stored value may be a hash — accepted as bearer via findOrgByToken's
+        // direct-match arm.
         return res.json({ apiKey: org.apiKey, orgId: org.id, orgName: org.name });
       }
 
@@ -1051,7 +1059,7 @@ export function createApiRouter(): Router {
           return res.status(401).json({ error: "Unauthorized. Missing API key." });
         }
         const db = getPrisma();
-        const caller = await db.organisation.findUnique({ where: { apiKey: token } });
+        const caller = await findOrgByToken(db, token);
         if (!caller || caller.id !== orgId) {
           return res.status(403).json({ error: "Forbidden. Internal only." });
         }

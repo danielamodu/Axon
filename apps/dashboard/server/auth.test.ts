@@ -6,8 +6,10 @@ import { createApiRouter } from "./api";
 import {
   buildProtocolId,
   comparePassword,
+  findOrgByToken,
   generateApiKeyValue,
   getBearerToken,
+  hashApiKey,
   hashPassword,
   isValidAddress,
   maskApiKey,
@@ -92,6 +94,37 @@ describe("auth helpers", () => {
     expect(getBearerToken(req("bearer abc123"))).toBe("abc123");
     expect(getBearerToken(req())).toBeNull();
     expect(getBearerToken(req(""))).toBeNull();
+  });
+
+  it("hashes API keys deterministically, never storing plaintext", () => {
+    const h1 = hashApiKey("axon_live_abc123");
+    const h2 = hashApiKey("  axon_live_abc123  ");
+    expect(h1).toBe(h2);
+    expect(h1).toMatch(/^axon_live_[0-9a-f]{32}$/);
+    expect(h1).not.toContain("abc123");
+    expect(hashApiKey("axon_live_other")).not.toBe(h1);
+  });
+
+  it("findOrgByToken matches hashed, legacy plaintext, and presented hashes", async () => {
+    const plain = "axon_live_testkey00000000000000000001";
+    const storedHash = hashApiKey(plain);
+    const org = { id: "org_1", name: "Test" };
+    const dbFor = (stored: any) => ({
+      organisation: {
+        findUnique: async ({ where }: any) =>
+          where.apiKey === stored ? org : null,
+      },
+    });
+
+    // New scheme: plaintext presented, hash stored
+    expect(await findOrgByToken(dbFor(storedHash), plain)).toEqual(org);
+    // Legacy row: plaintext stored
+    expect(await findOrgByToken(dbFor(plain), plain)).toEqual(org);
+    // Stored hash presented as bearer (email+password login flow)
+    expect(await findOrgByToken(dbFor(storedHash), storedHash)).toEqual(org);
+    // Unknown key
+    expect(await findOrgByToken(dbFor(storedHash), "axon_live_nope00000000000000000000")).toBeNull();
+    expect(await findOrgByToken(dbFor(storedHash), "   ")).toBeNull();
   });
 });
 
@@ -185,6 +218,13 @@ describe("auth + watcher HTTP endpoints (no-DB paths)", () => {
     });
     expect(res.status).toBe(401);
   }, 45000);
+
+  it("GET /health returns 200 without a database", async () => {
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+  });
 
   it("POST /auth/logout returns 200", async () => {
     const res = await fetch(`${base}/auth/logout`, { method: "POST" });

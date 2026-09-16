@@ -36,6 +36,43 @@ export function generateApiKeyValue(): string {
   return `axon_live_${crypto.randomBytes(16).toString("hex")}`;
 }
 
+/**
+ * Hash an API key for storage. Deterministic (sha256) so lookups stay a
+ * single indexed query. Must match packages/watcher/src/auth.ts.
+ * Plaintext is returned once at creation; only the hash is persisted.
+ */
+export function hashApiKey(key: string): string {
+  const digest = crypto.createHash("sha256").update(key.trim(), "utf8").digest("hex");
+  return `axon_live_${digest.slice(0, 32)}`;
+}
+
+/**
+ * Find an org by bearer token. Accepts:
+ *  1. plaintext keys (hashed then matched — current scheme),
+ *  2. legacy plaintext rows (direct match, migration window),
+ *  3. stored hashes presented as bearer (direct match — e.g. after
+ *     email+password login returns the stored value).
+ */
+export async function findOrgByToken(db: any, token: string) {
+  const trimmed = token.trim();
+  if (!trimmed) return null;
+  const hashed = hashApiKey(trimmed);
+  try {
+    const byHash = await db.organisation.findUnique({ where: { apiKey: hashed } });
+    if (byHash) return byHash;
+  } catch {
+    // fall through to direct match
+  }
+  if (trimmed !== hashed) {
+    try {
+      return await db.organisation.findUnique({ where: { apiKey: trimmed } });
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function buildProtocolId(name: string): string {
   const slug = name.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
   return (slug || "protocol").slice(0, 32);
@@ -71,9 +108,7 @@ export async function requireOrg(req: Request, res: Response) {
     return null;
   }
   try {
-    const org = await getAuthPrisma().organisation.findUnique({
-      where: { apiKey: token },
-    });
+    const org = await findOrgByToken(getAuthPrisma(), token);
     if (!org) {
       res.status(401).json({ error: "Unauthorized. Invalid API key." });
       return null;
