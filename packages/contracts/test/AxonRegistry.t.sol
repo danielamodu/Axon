@@ -149,6 +149,31 @@ contract AxonRegistryTest is Test {
         assertEq(results.length, 0);
     }
 
+    function test_getRecordCountByProtocol_tracksPerProtocol() public {
+        registry.logExecution(SKY_PROTOCOL, SPELL_A, ACTION_TYPE, TX_HASH_A, block.timestamp, 0, EXECUTOR_ADDR, 2);
+        registry.logExecution(SKY_PROTOCOL, SPELL_B, ACTION_TYPE, TX_HASH_B, block.timestamp, 0, EXECUTOR_ADDR, 1);
+        assertEq(registry.getRecordCountByProtocol(SKY_PROTOCOL), 2);
+        assertEq(registry.getRecordCountByProtocol(address(0xDEAD)), 0);
+    }
+
+    function test_getRecordsByProtocolPaginated_newestFirstWithOffset() public {
+        registry.logExecution(SKY_PROTOCOL, SPELL_A, ACTION_TYPE, TX_HASH_A, block.timestamp, 0, EXECUTOR_ADDR, 2);
+        registry.logExecution(SKY_PROTOCOL, SPELL_B, ACTION_TYPE, TX_HASH_B, block.timestamp, 0, EXECUTOR_ADDR, 1);
+        registry.logExecution(SKY_PROTOCOL, address(0xCCCC), ACTION_TYPE, bytes32(0), block.timestamp, 0, EXECUTOR_ADDR, 2);
+
+        AxonRegistry.ExecutionRecord[] memory page0 = registry.getRecordsByProtocolPaginated(SKY_PROTOCOL, 2, 0);
+        assertEq(page0.length, 2);
+        assertEq(page0[0].spellAddress, address(0xCCCC));
+        assertEq(page0[1].spellAddress, SPELL_B);
+
+        AxonRegistry.ExecutionRecord[] memory page1 = registry.getRecordsByProtocolPaginated(SKY_PROTOCOL, 2, 2);
+        assertEq(page1.length, 1);
+        assertEq(page1[0].spellAddress, SPELL_A);
+
+        AxonRegistry.ExecutionRecord[] memory empty = registry.getRecordsByProtocolPaginated(SKY_PROTOCOL, 2, 10);
+        assertEq(empty.length, 0);
+    }
+
     // -------------------------------------------------------------------------
     // Fuzz
     // -------------------------------------------------------------------------

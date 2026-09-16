@@ -26,6 +26,9 @@ contract AxonRegistry {
 
     mapping(uint256 => ExecutionRecord) public records;
     uint256 public recordCount;
+    /// @notice Per-protocol index: protocol => record ids (insertion order).
+    /// Avoids O(recordCount) scans in `getRecordsByProtocol`.
+    mapping(address => uint256[]) private protocolRecordIds;
 
     event ExecutionLogged(
         address indexed protocol,
@@ -75,6 +78,7 @@ contract AxonRegistry {
             executor: executorAddress,
             simulationScore: simulationScore
         });
+        protocolRecordIds[protocol].push(id);
         emit ExecutionLogged(protocol, spellAddress, txHash, executedAt, simulationScore);
     }
 
@@ -86,15 +90,36 @@ contract AxonRegistry {
     function getRecordsByProtocol(address protocol, uint256 limit)
         external view returns (ExecutionRecord[] memory)
     {
-        ExecutionRecord[] memory result = new ExecutionRecord[](limit);
-        uint256 found = 0;
-        for (uint256 i = 0; i < recordCount && found < limit; i++) {
-            if (records[i].protocol == protocol) {
-                result[found++] = records[i];
-            }
+        uint256 total = protocolRecordIds[protocol].length;
+        uint256 n = limit < total ? limit : total;
+        ExecutionRecord[] memory result = new ExecutionRecord[](n);
+        for (uint256 i = 0; i < n; i++) {
+            result[i] = records[protocolRecordIds[protocol][i]];
         }
-        // Resize result array to the actual number of matches found
-        assembly { mstore(result, found) }
         return result;
+    }
+
+    /// @notice Paginated read, newest-first (for dashboards). `offset` skips
+    /// the newest `offset` records. Returns at most `limit` entries.
+    function getRecordsByProtocolPaginated(address protocol, uint256 limit, uint256 offset)
+        external view returns (ExecutionRecord[] memory)
+    {
+        uint256 total = protocolRecordIds[protocol].length;
+        if (offset >= total || limit == 0) {
+            return new ExecutionRecord[](0);
+        }
+        uint256 remaining = total - offset;
+        uint256 n = limit < remaining ? limit : remaining;
+        ExecutionRecord[] memory result = new ExecutionRecord[](n);
+        for (uint256 i = 0; i < n; i++) {
+            uint256 id = protocolRecordIds[protocol][total - 1 - offset - i];
+            result[i] = records[id];
+        }
+        return result;
+    }
+
+    /// @notice Count of records for a protocol (for pagination UI).
+    function getRecordCountByProtocol(address protocol) external view returns (uint256) {
+        return protocolRecordIds[protocol].length;
     }
 }
