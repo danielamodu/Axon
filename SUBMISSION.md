@@ -32,7 +32,8 @@ Maximum Depth"):
 
 ## Which KeeperHub surfaces did you use?
 
-Direct Execution API (reads + `simulate:true` preflights), schedule triggers,
+Direct Execution API (reads + `simulate:true` preflights), KeeperHub MCP
+(agent-authored `execute_contract_call` + status polling), schedule triggers,
 workflow create/execute/status/logs, marketplace publish, per-protocol wallets,
 webhook sync, x402 payment verification. Audit trail of every run is stored on
 the spell record and surfaced in the dashboard + MCP server.
@@ -45,8 +46,17 @@ mainnet spells through the same safety gates.
 
 ## Transaction executed through KeeperHub
 
-- KH_EXecuted proof on the current registry: _PENDING — needs a workflow:create
-  scoped key; will replace this line with the tx link before Sep 18 12:00 CEST._
+Authored and executed by an AI agent over KeeperHub's MCP
+(`app.keeperhub.com/mcp`, session scopes `mcp:read mcp:write mcp:admin`):
+`tools_documentation` → `execute_contract_call` with `simulate:true`
+(`success:true`, `wouldRevert:false`) → same args with a unique
+`idempotency_key` → `get_direct_execution_status` → terminal `transactionLink`.
+
+- KH-executed proof on the current registry (record #1, `KH_MCP_PROOF`):
+  https://sepolia.basescan.org/tx/0x5cb18729f520a1dbd1a1c7d34c18b5105e29e4594b05be6d805dc534a3867000
+- KeeperHub execution id: `dwbomaug9tj40nwve0pda` (status `completed`).
+- Executor rotation enabling it (backend → KeeperHub Turnkey wallet):
+  https://sepolia.basescan.org/tx/0x7b7f193dbcf89506bcfc26a4150b469d6040b00ad7fe8f8f655c3f62335c66d2
 - Historical KeeperHub-executed proof (previous registry, Phase 9):
   https://sepolia.basescan.org/tx/0x97c0d6dede89c98cc4917d250256735c95c01afe61791cd6f360016e713b0bb7
 - Redeploy self-test proof (backend writer path, record #0):
@@ -55,8 +65,8 @@ mainnet spells through the same safety gates.
 ## What still breaks or is unfinished? (candid)
 
 - The configured KeeperHub key is read-scoped: workflow creation returns
-  `unauthorized`, so execution currently fails closed instead of executing.
-  One scoped key flips observe → live.
+  `unauthorized`, so Axon-built workflows currently fail closed instead of
+  executing. Direct execution through KeeperHub works (see proof tx above).
 - Conflict fingerprints are keyword heuristics, not decoded-calldata analysis.
 - The projector assesses current state + gas slope; it does not time-travel to
   the execution window.
