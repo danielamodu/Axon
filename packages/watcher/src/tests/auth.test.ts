@@ -46,21 +46,19 @@ describe('Auth Layer', () => {
       expect(result).toEqual(mockOrg)
     })
 
-    it('falls back to legacy plaintext rows during migration', async () => {
-      const legacyOrg = { id: 'org_legacy', name: 'Legacy', apiKey: 'axon_live_plain', apiKeyVersion: 1 }
-      mockPrisma.organisation.findUnique
-        .mockResolvedValueOnce(null) // hash miss
-        .mockResolvedValueOnce(legacyOrg) // plaintext hit
+    it('returns null for unknown keys (no legacy raw fallback)', async () => {
+      mockPrisma.organisation.findUnique.mockResolvedValue(null)
       const result = await validateApiKey('axon_live_plain', mockPrisma as unknown as PrismaClient)
-      expect(result).toEqual(legacyOrg)
+      expect(result).toBeNull()
+      expect(mockPrisma.organisation.findUnique).toHaveBeenCalledTimes(1)
+      expect(mockPrisma.organisation.findUnique).toHaveBeenCalledWith({
+        where: { apiKey: hashApiKey('axon_live_plain') },
+      })
     })
 
-    it('rejects presented hashes against v2 rows (stored value is not bearer)', async () => {
+    it('rejects presented hashes (stored value is not bearer)', async () => {
       const storedHash = hashApiKey('axon_live_realkey00000000000000000001')
-      // Attacker presents the leaked hash: H(hash) misses, raw hits a v2 row → reject
-      mockPrisma.organisation.findUnique
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({ id: 'org_v2', name: 'V2', apiKey: storedHash, apiKeyVersion: 2 })
+      mockPrisma.organisation.findUnique.mockResolvedValue(null)
       const result = await validateApiKey(storedHash, mockPrisma as unknown as PrismaClient)
       expect(result).toBeNull()
     })
