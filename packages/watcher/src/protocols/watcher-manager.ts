@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createPublicClient, http } from 'viem'
 import { mainnet } from 'viem/chains'
 import { PrismaClient } from '@prisma/client'
@@ -51,7 +52,9 @@ export class WatcherManager {
   }
 
   loadConfigs(dirPath?: string): ProtocolConfig[] {
-    const configsDir = dirPath ?? path.join(__dirname, 'configs')
+    // ESM-safe dirname (package is "type": "module" — bare __dirname crashes).
+    const here = path.dirname(fileURLToPath(import.meta.url))
+    const configsDir = dirPath ?? path.join(here, 'configs')
     return this.registry.loadFromDirectory(configsDir)
   }
 
