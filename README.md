@@ -15,7 +15,7 @@ Axon is an autonomous execution and operations pipeline for decentralized protoc
 - **Onchain Execution Registry**: Deployed on Base Sepolia (`AxonRegistry.sol`), logging gas used, simulation score, protocol address, spell contract, and transaction hash.
 - **Model Context Protocol (MCP) Server**: Provides 7 tools for AI agents (Claude, Cursor, Antigravity) to monitor queues, inspect simulations, review reliability metrics, and register protocols.
 - **Unified Developer CLI**: Full-featured `axon` command-line tool with interactive governance detection wizards, queue inspection, manual simulation, and credential management.
-- **Multi-Tenant Authentication & Dashboard**: API key authentication (`axon_live_...`) with organization scoping across the database, CLI, MCP server, and Next.js operations console.
+- **Multi-Tenant Authentication & Dashboard**: Versioned API key authentication (`axon_live_...`, sha256-hashed at rest, never valid as bearer in stored form) with organization scoping across the database, CLI, MCP server, and the Vite + Express operations console.
 
 ---
 
@@ -105,7 +105,7 @@ Ensure the following variables are set in `.env`:
 ```env
 DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 ETH_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
-BASE_SEPOLIA_RPC="https://sepolia.base.org"
+BASE_SEPOLIA_RPC_URL="https://sepolia.base.org"
 AXON_REGISTRY_ADDRESS="0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2"
 ```
 
@@ -141,7 +141,7 @@ axon register \
 ```
 
 ### Authentication and Key Management
-Credentials are encrypted and saved locally to `~/.axon/credentials.json`:
+Credentials are saved locally to `~/.axon/credentials.json` (plaintext — treat like a password, `axon login -k` to refresh after rotation):
 ```bash
 # Authenticate or create a workspace
 axon login
@@ -212,7 +212,8 @@ The MCP server runs in stdio mode for local IDE agents and simultaneously starts
 
 ## Operations Dashboard
 
-Axon includes an operations console built with Next.js App Router in `apps/dashboard`.
+Axon ships a full product: a Vite SPA served by an Express API in `apps/dashboard`
+(single container — see [Deployments](#deployments)).
 
 ### Features
 - **Authentication**: Key-based entry storing credentials in secure storage and validating against `/api/auth/verify`.
@@ -235,7 +236,8 @@ Navigate to `http://localhost:3000` and enter your Axon API key (generated via `
 
 ## Smart Contracts & Base Deployment
 
-The onchain audit log contract is deployed and verified on Base Sepolia.
+The onchain audit log contract is deployed on Base Sepolia (source verification
+submitted via Etherscan V2).
 
 ### Contract Overview
 
@@ -263,10 +265,32 @@ struct ExecutionRecord {
 > For dashboards use `getRecordsByProtocolPaginated(protocol, limit, offset)` (newest-first)
 > with `getRecordCountByProtocol`.
 
+### Onchain Proofs
+
+Every address and hash below is verifiable on [BaseScan Sepolia](https://sepolia.basescan.org):
+
+| What | Proof |
+| :--- | :--- |
+| Previous deployment (history) | [`0x572436712eADc4117202D36bdaFe1c54B6231330`](https://sepolia.basescan.org/address/0x572436712eADc4117202D36bdaFe1c54B6231330) |
+| Current deployment tx (contract creation) | [`0x86a4512d4fda585be3c60aaa28337e77d8ee198d2dc2808dd6ea2f90b4563a7a`](https://sepolia.basescan.org/tx/0x86a4512d4fda585be3c60aaa28337e77d8ee198d2dc2808dd6ea2f90b4563a7a) |
+| Redeploy self-test proof (`SELFTEST_REDEPLOY`, record #0) | [`0x17ba599153a2fa135e5b091a436fbae3bfb2ff17375b66eb9cce751b4dca4187`](https://sepolia.basescan.org/tx/0x17ba599153a2fa135e5b091a436fbae3bfb2ff17375b66eb9cce751b4dca4187) |
+
+Verify the record yourself with cast:
+
+```bash
+cast call 0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2 \
+  "getRecordCountByProtocol(address)" \
+  0x0a3f6849f78076aefaDf113F5BED87720274dDC0 \
+  --rpc-url https://sepolia.base.org
+# → 0x...01 (one proof and counting)
+```
+
 ### Security notes
 
-- API keys are stored hashed (`sha256`, `axon_live_<32hex>`). The plaintext is shown once at
-  `generate`/`rotate` time. Pre-hash rows still validate via a legacy fallback — re-rotate to migrate.
+- API keys are versioned and stored hashed (`sha256`, `axon_live_<32hex>`). The plaintext
+  is shown once at `generate`/`rotate` time, and the stored value is never accepted as
+  bearer — a database leak alone grants nothing. The v1 legacy fallback was removed
+  after all rows migrated (2026-09-17).
 - Dry-runs never forge proofs: no `txHash` is faked, `keeperHubStatus` is `'dry-run'`,
   and the registry writer is skipped. Filter `dry-run` rows out of operator history views.
 - Conflict timing proximity alone is a `WARNING` (stored in `conflictDetail.warnings`) and never
@@ -304,15 +328,18 @@ forge test -vv
 ```
 axon/
 ├── apps/
-│   └── dashboard/        # Next.js App Router operations dashboard & API routes
+│   └── dashboard/        # Vite SPA + Express API (full product, one container)
 ├── packages/
 │   ├── contracts/        # AxonRegistry.sol, Foundry tests, deployment scripts
 │   ├── shared/           # Protocol ABIs, addresses, and shared interfaces
 │   ├── watcher/          # Core pipeline: WatcherManager, StateProjector,
 │   │                     # ConflictDetector, ExecutionEngine, RegistryWriter
 │   ├── mcp-server/       # Model Context Protocol server (stdio & HTTP :3002)
+│   ├── x402-gateway/     # x402 payment gateway microservice
 │   └── cli/              # axon CLI (init, login, whoami, keys, status, queue)
-├── package.json          # Root workspace configuration
+├── .railway/            # Railway IaC (services, healthchecks, preserved vars)
+├── Dockerfile           # Single-image build for all services
+├── package.json         # Root workspace configuration
 └── README.md
 ```
 
@@ -320,11 +347,19 @@ axon/
 
 ## Deployments
 
-The dashboard (API + UI) runs as one container on Railway with autodeploys
-from `main`. Push → build (`Dockerfile`) → healthcheck (`/api/health`).
-Infra lives in `.railway/railway.ts`; secrets stay in Railway, never in git.
+Two services on Railway with autodeploys from `main`. Push → build (`Dockerfile`) →
+healthcheck. Infra lives in `.railway/railway.ts`; secrets stay in Railway, never in git.
 
-Live: `https://axon-production-d089.up.railway.app`
+| Service | What | Live | Health |
+| :--- | :--- | :--- | :--- |
+| `Axon` | Dashboard UI + API | `https://axon-production-d089.up.railway.app` | `/api/health` |
+| `AxonWatcher` | Pipeline: watch, project, conflict-check, execute, webhooks | `https://axonwatcher-production.up.railway.app` | `/health` |
+
+> The watcher runs **effectively observe-only**: the configured KeeperHub key is
+> read-scoped, so workflow creation fails closed (`unauthorized`) and nothing
+> executes onchain — watching, simulation, scoring, and conflict detection all
+> run for real. Going live = one key with workflow:create scope + a funded
+> KeeperHub wallet.
 
 ## License
 
