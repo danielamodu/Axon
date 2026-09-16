@@ -73,9 +73,11 @@ for in-graph verification, making payment atomic with execution.
 
 ```bash
 npx tsx scripts/verify-execution.ts   # read-only: prints the six ✅ lines
-npm run test:all                       # 210+ tests
-cd packages/contracts && forge test    # 15 tests
+npm run test:all                       # watcher + mcp + cli + gateway + dashboard
+cd packages/contracts && forge test    # contract unit + fuzz
 ```
+
+Counts live in test output — do not hardcode them here (see README).
 
 ## Submission proof
 

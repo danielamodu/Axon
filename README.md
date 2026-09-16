@@ -259,36 +259,42 @@ struct ExecutionRecord {
 | :--- | :--- | :--- | :--- |
 | **Base Sepolia** | `AxonRegistry` | `0x572436712eADc4117202D36bdaFe1c54B6231330` | [BaseScan](https://sepolia.basescan.org/address/0x572436712eADc4117202D36bdaFe1c54B6231330) |
 
+> Reads: `getRecordsByProtocol` is O(matches) via a per-protocol index.
+> For dashboards use `getRecordsByProtocolPaginated(protocol, limit, offset)` (newest-first)
+> with `getRecordCountByProtocol`.
+
+### Security notes
+
+- API keys are stored hashed (`sha256`, `axon_live_<32hex>`). The plaintext is shown once at
+  `generate`/`rotate` time. Pre-hash rows still validate via a legacy fallback — re-rotate to migrate.
+- Dry-runs never forge proofs: no `txHash` is faked, `keeperHubStatus` is `'dry-run'`,
+  and the registry writer is skipped. Filter `dry-run` rows out of operator history views.
+- Conflict timing proximity alone is a `WARNING` (stored in `conflictDetail.warnings`) and never
+  blocks `READY`. Only parameter overlap / ordering dependencies set `CONFLICT`.
+
 ---
 
 ## Test Suite & Verification
 
-Axon maintains a comprehensive test suite across unit, integration, simulation, CLI, MCP, and Foundry contracts:
+Axon maintains test suites across unit, integration, simulation, CLI, MCP, and Foundry contracts.
+Run them directly — do not rely on hardcoded counts in docs (they drift):
 
 ```bash
-# Run watcher & pipeline test suites (87 tests)
+# Run watcher & pipeline test suites
 npm run test:watcher
 
-# Run MCP server tests (5 tests)
+# Run MCP server tests
 npm run test:mcp
 
-# Run CLI unit & credentials tests (7 tests)
+# Run CLI unit & credentials tests
 npm run test:cli
 
-# Run Foundry contract unit & fuzz tests (12 tests)
+# Run everything (watcher + mcp + cli + gateway + dashboard)
+npm run test:all
+
+# Run Foundry contract unit & fuzz tests
 cd packages/contracts
 forge test -vv
-```
-
-```
-========================= TEST SUITE SUMMARY =========================
-  ✓ Watcher & Protocol System:  87 passed (10 vitest test files)
-  ✓ MCP Server:                  5 passed (1 vitest test file)
-  ✓ Axon CLI:                    7 passed (2 vitest test files)
-  ✓ Contracts (Base Sepolia):   12 passed (Foundry suite + fuzzing)
-----------------------------------------------------------------------
-  Total:                       111 / 111 passed (100% green)
-======================================================================
 ```
 
 ---
