@@ -48,28 +48,17 @@ export function hashApiKey(key: string): string {
 
 /**
  * Find an org by bearer token. v2 (hashed) rows match by hash only — the
- * stored value is never valid bearer. v1 (legacy plaintext) rows still
- * match raw during the migration window.
+ * stored value is never valid bearer. The v1 legacy fallback was removed
+ * after all rows migrated (v1 count hit zero 2026-09-17).
  */
 export async function findOrgByToken(db: any, token: string) {
   const trimmed = token.trim();
   if (!trimmed) return null;
-  const hashed = hashApiKey(trimmed);
   try {
-    const byHash = await db.organisation.findUnique({ where: { apiKey: hashed } });
-    if (byHash) return byHash;
+    return await db.organisation.findUnique({ where: { apiKey: hashApiKey(trimmed) } });
   } catch {
-    // fall through to legacy match
+    return null;
   }
-  if (trimmed !== hashed) {
-    try {
-      const legacy = await db.organisation.findUnique({ where: { apiKey: trimmed } });
-      if (legacy && legacy.apiKeyVersion !== 2) return legacy;
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 export function buildProtocolId(name: string): string {

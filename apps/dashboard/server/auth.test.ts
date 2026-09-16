@@ -105,29 +105,25 @@ describe("auth helpers", () => {
     expect(hashApiKey("axon_live_other")).not.toBe(h1);
   });
 
-  it("findOrgByToken matches hashed and legacy v1 rows, rejects v2 raw", async () => {
+  it("findOrgByToken matches by hash only", async () => {
     const plain = "axon_live_testkey00000000000000000001";
     const storedHash = hashApiKey(plain);
-    const dbFor = (stored: any, version: number) => ({
+    const dbFor = (stored: any) => ({
       organisation: {
         findUnique: async ({ where }: any) =>
-          where.apiKey === stored ? { id: "org_1", name: "Test", apiKeyVersion: version } : null,
+          where.apiKey === stored ? { id: "org_1", name: "Test", apiKeyVersion: 2 } : null,
       },
     });
 
-    // New scheme: plaintext presented, hash stored
-    expect(await findOrgByToken(dbFor(storedHash, 2), plain)).toEqual(
+    // Plaintext presented, hash stored → match
+    expect(await findOrgByToken(dbFor(storedHash), plain)).toEqual(
       expect.objectContaining({ id: "org_1" })
     );
-    // Legacy row: plaintext stored, v1
-    expect(await findOrgByToken(dbFor(plain, 1), plain)).toEqual(
-      expect.objectContaining({ id: "org_1" })
-    );
-    // Stored hash presented as bearer against v2 row → reject
-    expect(await findOrgByToken(dbFor(storedHash, 2), storedHash)).toBeNull();
-    // Unknown key
-    expect(await findOrgByToken(dbFor(storedHash, 2), "axon_live_nope00000000000000000000")).toBeNull();
-    expect(await findOrgByToken(dbFor(storedHash, 2), "   ")).toBeNull();
+    // Stored hash presented as bearer → reject
+    expect(await findOrgByToken(dbFor(storedHash), storedHash)).toBeNull();
+    // Unknown key → null
+    expect(await findOrgByToken(dbFor(storedHash), "axon_live_nope00000000000000000000")).toBeNull();
+    expect(await findOrgByToken(dbFor(storedHash), "   ")).toBeNull();
   });
 });
 
