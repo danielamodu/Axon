@@ -194,7 +194,7 @@ describe('ExecutionEngine', () => {
   })
 
   describe('executeSpell — full pipeline', () => {
-    it('transitions EXECUTING -> EXECUTED on successful dry-run', async () => {
+    it('transitions EXECUTING -> EXECUTED on successful dry-run (no forged hash)', async () => {
       const spell = createMockSpell()
       mockPrisma.spellRecord.findUnique.mockResolvedValue(spell)
 
@@ -207,15 +207,17 @@ describe('ExecutionEngine', () => {
 
       expect(report.status).toBe('EXECUTED')
       expect(report.retryCount).toBe(0)
-      expect(report.txHash).toMatch(/^0xdryrun/)
+      expect(report.dryRun).toBe(true)
+      // Fail-closed: dry-runs must not forge tx hashes
+      expect(report.txHash).toBeUndefined()
 
       // Confirm EXECUTING was written
       expect(mockPrisma.spellRecord.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'EXECUTING' }) })
       )
-      // Confirm EXECUTED was written
+      // Confirm EXECUTED was written with dry-run marker
       expect(mockPrisma.spellRecord.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ status: 'EXECUTED' }) })
+        expect.objectContaining({ data: expect.objectContaining({ status: 'EXECUTED', keeperHubStatus: 'dry-run' }) })
       )
     })
 
@@ -310,14 +312,35 @@ describe('ExecutionEngine', () => {
   })
 
   describe('pollForConfirmation — dry-run mode', () => {
-    it('returns EXECUTED with a dry-run txHash in dry-run mode', async () => {
+    it('returns EXECUTED without a forged txHash in dry-run mode', async () => {
       const result = await engine.pollForConfirmation(
         '0xaabbcc',
         'local-workflow-1234',
         'local-exec-12345'
       )
       expect(result.status).toBe('EXECUTED')
-      expect(result.txHash).toMatch(/^0xdryrun/)
+      expect(result.txHash).toBeUndefined()
+    })
+
+    it('exits early when webhook already completed the spell', async () => {
+      mockPrisma.spellRecord.findUnique.mockResolvedValue({ status: 'EXECUTED', txHash: '0xabc', executedAt: new Date() })
+      const khEngine = new ExecutionEngine(
+        mockClient as unknown as PublicClient,
+        mockPrisma as unknown as PrismaClient,
+        mockNotify,
+        'test-key'
+      )
+      // Force non-dry-run path with a real-looking execution id, then stub KH client
+      ;(khEngine as any).khClient = {
+        getExecutionStatus: vi.fn().mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 5))
+          return { status: 'running' }
+        }),
+        getExecutionLogs: vi.fn().mockResolvedValue({ data: [] }),
+      }
+      const result = await khEngine.pollForConfirmation('0xaaa', 'wf-1', 'exec-real-1', 'spell-1')
+      expect(result.status).toBe('EXECUTED')
+      expect(result.txHash).toBe('0xabc')
     })
   })
 })

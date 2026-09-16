@@ -73,7 +73,9 @@ describe('Phase 8 — KeeperHub Execution Depth & Verification', () => {
 
     expect(result).toBeDefined()
     expect(result.executionId).toBe('local-exec-1234')
-    expect(result.status).toBe('completed')
+    expect(result.status).toBe('dry-run')
+    expect(result.dryRun).toBe(true)
+    expect(result.txHash).toBeNull()
     expect(result.auditLog).toBeInstanceOf(Array)
     expect(result.auditLog.length).toBeGreaterThanOrEqual(4)
   })
@@ -82,8 +84,8 @@ describe('Phase 8 — KeeperHub Execution Depth & Verification', () => {
     const engine = new ExecutionEngine(mockPublicClient, mockPrisma, mockNotify, undefined, mockRegistry)
     const result = await engine.getExecution('gateway-exec-5678')
 
-    expect(result.status).toBe('completed')
-    expect(result.txHash).toBeDefined()
+    expect(result.status).toBe('dry-run')
+    expect(result.txHash).toBeNull()
     const nodeNames = result.auditLog.map((l: any) => l.node)
     expect(nodeNames).toContain('read-hat')
     expect(nodeNames).toContain('execute-cast')
@@ -156,7 +158,7 @@ describe('Phase 8 — KeeperHub Execution Depth & Verification', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           keeperHubExecutionId: expect.any(String),
-          keeperHubStatus: 'completed',
+          keeperHubStatus: 'dry-run',
         }),
       })
     )

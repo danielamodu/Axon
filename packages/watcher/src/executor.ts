@@ -82,6 +82,8 @@ export interface ExecutionReport {
    *  simulation-only mode. Dry runs must never be mistaken for onchain
    *  execution: no registry proof is written for them. */
   dryRun: boolean
+  keeperHubExecutionId?: string
+  x402PaymentTxHash?: string
 }
 
 export class ExecutionEngine {
@@ -339,9 +341,12 @@ export class ExecutionEngine {
       }).catch(() => {})
     }
 
-    // Step 7: Poll for confirmation with exponential backoff schedule
+    // Step 7: Poll for confirmation with phased backoff schedule.
+    // Webhook-sync (`POST /webhook/keeperhub`) can mark this spell EXECUTED/
+    // FAILED concurrently — pollForConfirmation checks the DB each iteration
+    // and exits early so the loop never head-of-line blocks on a stale poll.
     logger.info({ spellAddress, executionId, workflowId }, '🔄 Polling for execution confirmation')
-    const result = await this.pollForConfirmation(spellAddress, workflowId, executionId)
+    const result = await this.pollForConfirmation(spellAddress, workflowId, executionId, spell.id)
 
     if (result.status === 'EXECUTED') {
       // Step 8a: Fetch KeeperHub execution details & audit log
@@ -354,18 +359,18 @@ export class ExecutionEngine {
         data: {
           status: 'EXECUTED',
           executedAt: result.executedAt,
-          txHash: result.txHash,
+          txHash: result.txHash ?? null,
           gasUsed: result.gasUsed,
           keeperHubExecutionId: executionId,
           keeperHubWorkflowId: workflowId,
           keeperHubAuditLog: auditLog,
-          keeperHubStatus: khStatus,
+          keeperHubStatus: dryRun ? 'dry-run' : khStatus,
         },
       })
 
       await this.notify.notifyExecutionSucceeded({
         spellAddress,
-        txHash: result.txHash!,
+        txHash: result.txHash ?? (dryRun ? 'dry-run (no onchain tx)' : 'unknown'),
         gasUsed: result.gasUsed ? result.gasUsed.toString() : 'unknown',
         executedAt: result.executedAt ?? new Date(),
         keeperHubExecutionId: executionId,
@@ -412,24 +417,30 @@ export class ExecutionEngine {
       }
     } else {
       // Execution failed (not simulation failure — actual onchain revert or timeout)
+      // Non-blocking retry: requeue as READY with a delayed window instead of
+      // sleeping 2 minutes inside the poll loop (which head-of-line blocked
+      // every other spell). The next poll() picks it up after the delay.
       if (retryCount === 0 && result.error !== 'TIMEOUT') {
-        // Step 9: Retry once with fresh simulation after 2 minutes
-        logger.warn({ spellAddress, error: result.error }, '⚠️ Execution failed — retrying once after 2 minutes')
-        await sleep(2 * 60_000)
+        logger.warn({ spellAddress, error: result.error }, '⚠️ Execution failed — requeuing for one delayed retry')
 
-        // Re-fetch spell record in case state changed
-        const refreshed = await this.prisma.spellRecord.findUnique({ where: { id: spell.id } })
-        if (!refreshed || refreshed.status === 'EXECUTED') {
-          logger.info({ spellAddress }, 'Spell already executed during retry wait — skipping retry')
-          return { spellAddress, workflowId, executionId, status: 'EXECUTED', retryCount: 1, dryRun }
-        }
-
-        // Reset to READY so retry pipeline begins cleanly
         await this.prisma.spellRecord.update({
           where: { id: spell.id },
-          data: { status: 'READY' },
-        })
-        return this.executeSpell(refreshed, retryCount + 1)
+          data: {
+            status: 'READY',
+            conflictStatus: null,
+            nextExecutionWindow: new Date(Date.now() + 2 * 60_000),
+          },
+        }).catch(() => {})
+
+        return {
+          spellAddress,
+          workflowId,
+          executionId,
+          status: 'FAILED',
+          error: `${result.error ?? 'Execution failed'} (requeued for retry)`,
+          retryCount: retryCount + 1,
+          dryRun,
+        }
       }
 
       // Step 9b: Give up — set FAILED
@@ -818,7 +829,8 @@ export class ExecutionEngine {
   async pollForConfirmation(
     spellAddress: string,
     workflowId: string,
-    executionId: string
+    executionId: string,
+    spellId?: string
   ): Promise<{
     status: 'EXECUTED' | 'FAILED'
     txHash?: string
@@ -827,11 +839,12 @@ export class ExecutionEngine {
     error?: string
   }> {
     if (!this.khClient || executionId.startsWith('local-exec-')) {
-      // Dry-run: simulate success
-      logger.info({ executionId }, '[DRY RUN] Simulated execution confirmed')
+      // Dry-run: never forge a tx hash. Callers must check `dryRun` and skip
+      // registry proofs + render separately from real EXECUTED rows.
+      logger.info({ executionId }, '[DRY RUN] Simulated execution confirmed (no tx hash)')
       return {
         status: 'EXECUTED',
-        txHash: `0xdryrun${Date.now().toString(16)}`,
+        txHash: undefined,
         executedAt: new Date(),
       }
     }
@@ -846,6 +859,25 @@ export class ExecutionEngine {
         logger.error({ spellAddress, executionId, elapsedMinutes }, '⏱️ Execution polling timed out after 30 minutes')
         await this.notify.notifyTimeoutWarning({ spellAddress, executionId, elapsedMinutes })
         return { status: 'FAILED', error: 'TIMEOUT' }
+      }
+
+      // Cooperative exit first: webhook-sync may have already completed this
+      // spell. Checked before sleeping so webhook wins instantly in tests
+      // and production instead of waiting out a 15s poll interval.
+      if (spellId) {
+        try {
+          const current = await this.prisma.spellRecord.findUnique({ where: { id: spellId } })
+          if (current?.status === 'EXECUTED') {
+            logger.info({ spellId, executionId }, 'Webhook already marked EXECUTED — exiting poll early')
+            return { status: 'EXECUTED', txHash: current.txHash ?? undefined, executedAt: current.executedAt ?? new Date() }
+          }
+          if (current?.status === 'FAILED') {
+            logger.info({ spellId, executionId }, 'Webhook already marked FAILED — exiting poll early')
+            return { status: 'FAILED', error: 'Marked FAILED via webhook' }
+          }
+        } catch {
+          // DB check is best-effort — fall through to KeeperHub poll
+        }
       }
 
       // Determine poll interval based on elapsed time
@@ -899,18 +931,19 @@ export class ExecutionEngine {
       return {
         executionId,
         workflowId: 'local-workflow',
-        status: 'completed',
+        status: 'dry-run',
+        dryRun: true,
         startedAt: new Date(Date.now() - 60000).toISOString(),
         completedAt: nowIso,
-        txHash: '0x900c952c676595DdB392FA6349aD5f0674a67Eeb',
-        gasUsed: '1248921',
+        txHash: null,
+        gasUsed: null,
         auditLog: [
           { node: 'read-hat', status: 'success', completedAt: nowIso },
           { node: 'check-hat', status: 'success', completedAt: nowIso },
           { node: 'simulate-cast', status: 'success', wouldRevert: false, completedAt: nowIso },
-          { node: 'execute-cast', status: 'success', txHash: '0x900c952c676595DdB392FA6349aD5f0674a67Eeb', gasUsed: '1248921', completedAt: nowIso },
+          { node: 'execute-cast', status: 'dry-run', txHash: null, gasUsed: null, completedAt: nowIso },
           { node: 'verify-hat', status: 'success', completedAt: nowIso },
-          { node: 'notify-registry', status: 'success', completedAt: nowIso },
+          { node: 'notify-registry', status: 'skipped-dry-run', completedAt: nowIso },
           { node: 'notify-discord-success', status: 'success', completedAt: nowIso },
         ],
       }
