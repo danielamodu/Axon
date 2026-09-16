@@ -14,6 +14,38 @@ export interface GasPriceTrend {
   averageGwei: number
   stddevGwei: number
   recentBlocks: number[]
+  /** Linear slope (gwei per block, oldest → newest). Positive = rising. */
+  slopeGweiPerBlock: number
+}
+
+/** Per-protocol risk thresholds. Defaults preserve legacy Sky behavior. */
+export interface ProjectorThresholds {
+  maxAvgGasGwei: number
+  maxGasStddevGwei: number
+  /** Slope above which a rising gas market forces YELLOW (when avg is also elevated). */
+  maxGasSlopeGweiPerBlock: number
+  /** Avg gas above which slope matters. */
+  slopeGateAvgGwei: number
+  minVatHeadroomUsds: number
+  maxOracleAgeSecondsRed: number
+  staleOracleAgeSecondsYellow: number
+}
+
+export const DEFAULT_PROJECTOR_THRESHOLDS: ProjectorThresholds = {
+  maxAvgGasGwei: 100,
+  maxGasStddevGwei: 30,
+  maxGasSlopeGweiPerBlock: 5,
+  slopeGateAvgGwei: 50,
+  minVatHeadroomUsds: 100_000_000,
+  maxOracleAgeSecondsRed: 24 * 3600,
+  staleOracleAgeSecondsYellow: 3 * 3600,
+}
+
+/** Non-Sky protocols get tighter/looser bands without touching code. */
+export const PROTOCOL_PROJECTOR_THRESHOLDS: Record<string, Partial<ProjectorThresholds>> = {
+  sky: {},
+  aave: { minVatHeadroomUsds: 50_000_000 },
+  compound: { minVatHeadroomUsds: 50_000_000 },
 }
 
 export interface ProjectedChainState {
@@ -120,8 +152,9 @@ export class StateProjector {
     // 3. Simulate execution against projected state
     const simulation = await this.simulateContractCall(spell.spellAddress as Address)
 
-    // 4. Score spell
-    const assessment = this.scoreSpell(state, simulation)
+    // 4. Score spell with per-protocol thresholds when available
+    const thresholds = resolveThresholds((spell as { protocolId?: string }).protocolId)
+    const assessment = this.scoreSpell(state, simulation, thresholds)
 
     // 5. Update SpellRecord status and score
     let nextStatus: 'READY' | 'HELD' = assessment.score === 'RED' ? 'HELD' : 'READY'
@@ -175,6 +208,9 @@ export class StateProjector {
    * Project state inputs: Gas trend, USDS supply, Vat headroom, Chainlink price.
    * Contract reads go through the KeeperHub oracle first; gas-trend block
    * data stays on viem (no KeeperHub block-data surface exists).
+   * NOTE: reads are current-state, not time-travel to targetTime. `projectedAt`
+   * records the window being assessed; the gas slope flags deterioration
+   * toward that window instead of pretending to forecast exactly.
    */
   async projectChainState(targetTime: Date): Promise<ProjectedChainState> {
     const [gasTrend, usds, vat, ethOracle] = await Promise.all([
@@ -198,7 +234,7 @@ export class StateProjector {
   }
 
   /**
-   * Calculate ETH gas price average and standard deviation over last 10 blocks
+   * Calculate ETH gas price average, stddev, and linear trend slope over last 10 blocks
    */
   async getGasPriceTrend(): Promise<GasPriceTrend> {
     const latestBlockNumber = await this.client.getBlockNumber()
@@ -221,6 +257,7 @@ export class StateProjector {
       averageGwei,
       stddevGwei,
       recentBlocks: baseFeesGwei,
+      slopeGweiPerBlock: computeSlope(baseFeesGwei.slice().reverse()),
     }
   }
 
@@ -428,9 +465,14 @@ export class StateProjector {
   }
 
   /**
-   * Score spell based on simulation and projected state
+   * Score spell based on simulation and projected state.
+   * Thresholds are injectable per-protocol; defaults preserve Sky behavior.
    */
-  scoreSpell(state: ProjectedChainState, simulation: SimulationResult): ScoreAssessment {
+  scoreSpell(
+    state: ProjectedChainState,
+    simulation: SimulationResult,
+    thresholds: ProjectorThresholds = DEFAULT_PROJECTOR_THRESHOLDS
+  ): ScoreAssessment {
     const reasons: string[] = []
     let score: SimulationScore = 'GREEN'
 
@@ -445,29 +487,38 @@ export class StateProjector {
       reasons.push('Vat debt ceiling is completely exhausted (headroom <= 0)')
     }
 
-    if (state.ethPriceUsd <= 0 || state.oracleAgeSeconds > 24 * 3600) {
+    if (state.ethPriceUsd <= 0 || state.oracleAgeSeconds > thresholds.maxOracleAgeSecondsRed) {
       score = 'RED'
       reasons.push('Chainlink ETH/USD oracle offline or returned invalid price')
     }
 
     // Yellow Criteria (only if not already RED)
     if (score !== 'RED') {
-      if (state.gasTrend.averageGwei > 100) {
+      if (state.gasTrend.averageGwei > thresholds.maxAvgGasGwei) {
         score = 'YELLOW'
         reasons.push(`High average gas price: ${state.gasTrend.averageGwei.toFixed(2)} gwei`)
       }
 
-      if (state.gasTrend.stddevGwei > 30) {
+      if (state.gasTrend.stddevGwei > thresholds.maxGasStddevGwei) {
         score = 'YELLOW'
         reasons.push(`High gas price volatility: stddev ${state.gasTrend.stddevGwei.toFixed(2)} gwei`)
       }
 
-      if (state.vatHeadroomUsds < 100_000_000) {
+      const slope = state.gasTrend.slopeGweiPerBlock ?? 0
+      if (
+        slope > thresholds.maxGasSlopeGweiPerBlock &&
+        state.gasTrend.averageGwei > thresholds.slopeGateAvgGwei
+      ) {
+        score = 'YELLOW'
+        reasons.push(`Rising gas trend: +${slope.toFixed(2)} gwei/block toward execution window`)
+      }
+
+      if (state.vatHeadroomUsds < thresholds.minVatHeadroomUsds) {
         score = 'YELLOW'
         reasons.push(`Low Vat debt ceiling headroom: ${(state.vatHeadroomUsds / 1e6).toFixed(2)}M USDS`)
       }
 
-      if (state.oracleAgeSeconds > 3 * 3600) {
+      if (state.oracleAgeSeconds > thresholds.staleOracleAgeSecondsYellow) {
         score = 'YELLOW'
         reasons.push(`Chainlink price feed stale: ${Math.floor(state.oracleAgeSeconds / 60)} minutes old`)
       }
@@ -488,4 +539,32 @@ export class StateProjector {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Least-squares slope over oldest→newest samples. Returns 0 for <2 points. */
+export function computeSlope(samples: number[]): number {
+  const n = samples.length
+  if (n < 2) return 0
+  let sumX = 0
+  let sumY = 0
+  let sumXY = 0
+  let sumXX = 0
+  for (let i = 0; i < n; i++) {
+    sumX += i
+    sumY += samples[i]
+    sumXY += i * samples[i]
+    sumXX += i * i
+  }
+  const denom = n * sumXX - sumX * sumX
+  if (denom === 0) return 0
+  return (n * sumXY - sumX * sumY) / denom
+}
+
+/** Merge protocol-specific overrides (e.g. from Protocol.config.thresholds). */
+export function resolveThresholds(protocolId?: string, overrides?: Partial<ProjectorThresholds>): ProjectorThresholds {
+  return {
+    ...DEFAULT_PROJECTOR_THRESHOLDS,
+    ...(protocolId ? PROTOCOL_PROJECTOR_THRESHOLDS[protocolId.toLowerCase()] ?? {} : {}),
+    ...(overrides ?? {}),
+  }
 }

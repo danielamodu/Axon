@@ -14,6 +14,7 @@ describe('StateProjector', () => {
       averageGwei: 25.0,
       stddevGwei: 5.0,
       recentBlocks: [25, 26, 24, 25, 27, 23, 25, 24, 26, 25],
+      slopeGweiPerBlock: 0.05,
     },
     usdsTotalSupply: 6_000_000_000,
     vatHeadroomUsds: 500_000_000,
@@ -94,6 +95,7 @@ describe('StateProjector', () => {
           averageGwei: 125,
           stddevGwei: 10,
           recentBlocks: [120, 130],
+          slopeGweiPerBlock: 0,
         },
       }
       const sim: SimulationResult = { success: true, simulatedVia: 'viem' }
@@ -110,6 +112,7 @@ describe('StateProjector', () => {
           averageGwei: 40,
           stddevGwei: 35,
           recentBlocks: [10, 75],
+          slopeGweiPerBlock: 0,
         },
       }
       const sim: SimulationResult = { success: true, simulatedVia: 'viem' }
@@ -141,6 +144,21 @@ describe('StateProjector', () => {
 
       expect(assessment.score).toBe('YELLOW')
       expect(assessment.reasons.some((r) => r.includes('stale'))).toBe(true)
+    })
+
+    it('scores YELLOW on rising gas trend even when average is moderate', async () => {
+      const { computeSlope, resolveThresholds } = await import('../projector')
+      expect(computeSlope([10, 20, 30, 40])).toBeGreaterThan(5)
+      expect(computeSlope([50, 50, 50, 50])).toBeCloseTo(0, 5)
+      const state: ProjectedChainState = {
+        ...defaultMockState,
+        gasTrend: { averageGwei: 60, stddevGwei: 5, recentBlocks: [40, 50, 60, 70, 80], slopeGweiPerBlock: 10 },
+      }
+      const assessment = projector.scoreSpell(state, { success: true, simulatedVia: 'viem' })
+      expect(assessment.score).toBe('YELLOW')
+      expect(assessment.reasons.some((r) => r.includes('Rising gas trend'))).toBe(true)
+      // Per-protocol overrides apply without code changes
+      expect(resolveThresholds('aave').minVatHeadroomUsds).toBe(50_000_000)
     })
   })
 
