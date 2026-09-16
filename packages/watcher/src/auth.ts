@@ -24,8 +24,9 @@ export function hashApiKey(key: string): string {
 
 /**
  * Validates an Axon API key.
- * Looks up Organisation by hashed key first, falling back to a legacy
- * plaintext row (migration window for pre-hash deployments).
+ * v2 (hashed) rows match by hash only — the stored value is never accepted
+ * as bearer, so a DB leak alone grants nothing. v1 (legacy plaintext) rows
+ * still match raw during the migration window and emit a deprecation warning.
  */
 export async function validateApiKey(
   key: string,
@@ -43,12 +44,15 @@ export async function validateApiKey(
   })
   if (org) return org
 
-  // Legacy fallback: rows created before hashing. Remove after migration.
+  // Legacy fallback, scoped to v1 rows only. Remove once v1 count hits zero
+  // (SELECT COUNT(*) FROM "Organisation" WHERE "apiKeyVersion" = 1).
   if (trimmed !== hashed) {
     const legacy = await prisma.organisation.findUnique({
       where: { apiKey: trimmed },
     })
-    if (legacy) return legacy
+    if (legacy && (legacy as { apiKeyVersion?: number }).apiKeyVersion !== 2) {
+      return legacy
+    }
   }
 
   return null
@@ -90,6 +94,7 @@ export async function generateApiKey(
     data: {
       name: orgName.trim(),
       apiKey: hashApiKey(apiKey),
+      apiKeyVersion: 2,
       email: email ? email.trim() : null,
     },
   })
@@ -111,7 +116,7 @@ export async function rotateApiKey(
 
   const org = await prisma.organisation.update({
     where: { id: orgId },
-    data: { apiKey: hashApiKey(apiKey) },
+    data: { apiKey: hashApiKey(apiKey), apiKeyVersion: 2 },
   })
 
   return { org, apiKey }

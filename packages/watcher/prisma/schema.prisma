@@ -11,6 +11,9 @@ model Organisation {
   id                String             @id @default(cuid())
   name              String
   apiKey            String             @unique @default(cuid())
+  // 1 = legacy plaintext row (raw-match fallback allowed, deprecated).
+  // 2 = hashed row (hash lookup only; stored value is never valid bearer).
+  apiKeyVersion     Int                @default(1)
   email             String?
   passwordHash      String?
   emailVerified     Boolean            @default(false)

@@ -47,12 +47,22 @@ describe('Auth Layer', () => {
     })
 
     it('falls back to legacy plaintext rows during migration', async () => {
-      const legacyOrg = { id: 'org_legacy', name: 'Legacy', apiKey: 'axon_live_plain' }
+      const legacyOrg = { id: 'org_legacy', name: 'Legacy', apiKey: 'axon_live_plain', apiKeyVersion: 1 }
       mockPrisma.organisation.findUnique
         .mockResolvedValueOnce(null) // hash miss
         .mockResolvedValueOnce(legacyOrg) // plaintext hit
       const result = await validateApiKey('axon_live_plain', mockPrisma as unknown as PrismaClient)
       expect(result).toEqual(legacyOrg)
+    })
+
+    it('rejects presented hashes against v2 rows (stored value is not bearer)', async () => {
+      const storedHash = hashApiKey('axon_live_realkey00000000000000000001')
+      // Attacker presents the leaked hash: H(hash) misses, raw hits a v2 row → reject
+      mockPrisma.organisation.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'org_v2', name: 'V2', apiKey: storedHash, apiKeyVersion: 2 })
+      const result = await validateApiKey(storedHash, mockPrisma as unknown as PrismaClient)
+      expect(result).toBeNull()
     })
   })
 
@@ -102,6 +112,7 @@ describe('Auth Layer', () => {
         data: {
           name: 'Aave Governance',
           apiKey: hashApiKey(result.apiKey),
+          apiKeyVersion: 2,
           email: 'admin@aave.com',
         },
       })
@@ -131,7 +142,7 @@ describe('Auth Layer', () => {
       expect(result.org.id).toBe('org_uni')
       expect(mockPrisma.organisation.update).toHaveBeenCalledWith({
         where: { id: 'org_uni' },
-        data: { apiKey: hashApiKey(result.apiKey) },
+        data: { apiKey: hashApiKey(result.apiKey), apiKeyVersion: 2 },
       })
     })
   })
