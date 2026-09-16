@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   extractParameterFingerprint,
+  extractSelector,
+  extractStructuralFingerprint,
   detectConflicts,
   ConflictDetector,
 } from '../conflict-detector'
@@ -237,6 +239,69 @@ describe('ConflictDetector', () => {
       const result = detectConflicts(spellA, [spellB])
       const race = result.conflicts.find((c) => c.conflictType === 'RACE_CONDITION')
       expect(race).toBeUndefined()
+    })
+  })
+
+  describe('detectConflicts — STRUCTURAL overlap (decoded calldata)', () => {
+    it('extracts selectors without throwing on garbage', () => {
+      expect(extractSelector('0x12345678abcdef')).toBe('selector:0x12345678')
+      expect(extractSelector('0x')).toBeNull()
+      expect(extractSelector('not-hex')).toBeNull()
+      expect(extractSelector(undefined)).toBeNull()
+      expect(extractSelector(42 as any)).toBeNull()
+    })
+
+    it('fingerprints targets, selectors, and function names', () => {
+      const fp = extractStructuralFingerprint('0xdeadbeef0011', [
+        { target: '0x1111111111111111111111111111111111111111', signature: 'File(bytes32,bytes32,uint256)', calldata: '0x29ae81140001' },
+      ])
+      expect(fp.has('selector:0xdeadbeef')).toBe(true)
+      expect(fp.has('target:0x1111111111111111111111111111111111111111')).toBe(true)
+      expect(fp.has('selector:0x29ae8114')).toBe(true)
+      expect(fp.has('fn:file')).toBe(true)
+    })
+
+    it('flags BLOCKING overlap when spells touch the same contract with unrelated descriptions', () => {
+      const spellA = createMockSpell({
+        spellAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        calldata: '0x12345678',
+        actions: [{ target: '0x9999999999999999999999999999999999999999', signature: 'poke()', calldata: '0x', description: 'Routine maintenance task alpha' }],
+        nextExecutionWindow: new Date('2026-09-08T14:00:00.000Z'),
+      })
+      const spellB = createMockSpell({
+        spellAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        calldata: '0xabcdef99',
+        actions: [{ target: '0x9999999999999999999999999999999999999999', signature: 'poke()', calldata: '0x', description: 'Entirely different quarterly review' }],
+        nextExecutionWindow: new Date('2026-09-08T18:00:00.000Z'), // 4h apart: no race involved
+      })
+
+      const result = detectConflicts(spellA, [spellB])
+
+      expect(result.hasConflict).toBe(true)
+      const overlap = result.conflicts.find((c) => c.conflictType === 'PARAMETER_OVERLAP')
+      expect(overlap).toBeDefined()
+      expect(overlap?.severity).toBe('BLOCKING')
+      expect(overlap?.details?.structuralOverlap).toContain('target:0x9999999999999999999999999999999999999999')
+    })
+
+    it('stays clear when targets, selectors, and params are all disjoint', () => {
+      const spellA = createMockSpell({
+        spellAddress: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        calldata: '0x11111111',
+        actions: [{ target: '0x1111111111111111111111111111111111111111', signature: 'aaa()', calldata: '0x', description: 'Update DAI savings rate (DSR)' }],
+        nextExecutionWindow: new Date('2026-09-08T14:00:00.000Z'),
+      })
+      const spellB = createMockSpell({
+        spellAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        calldata: '0x22222222',
+        actions: [{ target: '0x2222222222222222222222222222222222222222', signature: 'bbb()', calldata: '0x', description: 'Configure token rewards distribution' }],
+        nextExecutionWindow: new Date('2026-09-08T18:00:00.000Z'),
+      })
+
+      const result = detectConflicts(spellA, [spellB])
+
+      expect(result.hasConflict).toBe(false)
+      expect(result.conflicts.length).toBe(0)
     })
   })
 

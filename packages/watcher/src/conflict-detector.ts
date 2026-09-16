@@ -117,6 +117,49 @@ export function extractParameterFingerprint(description: string, actions?: unkno
 }
 
 /**
+ * Extract the 4-byte function selector from raw calldata hex (`0x` + 8 hex
+ * chars). Returns null for missing/malformed input — never throws.
+ */
+export function extractSelector(calldataHex?: unknown): string | null {
+  if (typeof calldataHex !== 'string') return null
+  const m = calldataHex.toLowerCase().match(/^0x([0-9a-f]{8})/)
+  return m ? `selector:0x${m[1]}` : null
+}
+
+/**
+ * Structural fingerprint: what contracts a spell touches and which functions
+ * it calls — decoded from calldata, not from English descriptions. Two spells
+ * calling the same target (or the same selector) are structurally linked even
+ * when their descriptions share no keywords.
+ */
+export function extractStructuralFingerprint(
+  rawCalldata?: unknown,
+  actions?: unknown
+): Set<string> {
+  const fp = new Set<string>()
+
+  const top = extractSelector(rawCalldata)
+  if (top) fp.add(top)
+
+  if (Array.isArray(actions)) {
+    for (const action of actions) {
+      if (typeof action?.target === 'string' && /^0x[0-9a-fA-F]{40}$/.test(action.target)) {
+        fp.add(`target:${action.target.toLowerCase()}`)
+      }
+      const sel = extractSelector(action?.calldata)
+      if (sel) fp.add(sel)
+      if (typeof action?.signature === 'string' && action.signature.length > 0) {
+        // Normalize `cast()` → `cast`, `file(bytes32,bytes32,uint256)` → `file`
+        const name = action.signature.toLowerCase().split('(')[0].trim()
+        if (name) fp.add(`fn:${name}`)
+      }
+    }
+  }
+
+  return fp
+}
+
+/**
  * Pure function to detect conflicts for a candidate spell against a set of comparison spells
  */
 export function detectConflicts(
@@ -150,19 +193,35 @@ export function detectConflicts(
     }
     const otherFingerprint = extractParameterFingerprint(otherDesc, other.actions)
 
+    // Structural fingerprints — decoded from calldata, not descriptions.
+    const candidateStructural = extractStructuralFingerprint(candidate.calldata, candidate.actions)
+    const otherStructural = extractStructuralFingerprint(other.calldata, other.actions)
+    // Only target:/selector: tags link spells. fn: is near-universal
+    // (every spell calls cast()/execute()) and would link everything.
+    const structuralOverlap = [...candidateStructural].filter(
+      (s) => !s.startsWith('fn:') && otherStructural.has(s)
+    )
+
     // Conflict Type 1: PARAMETER_OVERLAP (BLOCKING)
-    // Ignore pure address/signature tags — overlap must be on a governance
-    // parameter (stability_fee, debt_ceiling, ilk:*, etc.).
+    // Keyword overlap on governance parameters (stability_fee, debt_ceiling,
+    // ilk:*, etc.) — pure address/signature tags excluded here because they
+    // are evaluated structurally below.
     const overlappingParams = [...combinedCandidateFingerprint].filter(
       (p) => !p.startsWith('target:') && !p.startsWith('sig:') && otherFingerprint.has(p)
     )
-    if (overlappingParams.length > 0) {
+    if (overlappingParams.length > 0 || structuralOverlap.length > 0) {
+      const evidence = [...overlappingParams]
+      const structuralOnly = structuralOverlap.filter((s) => !evidence.includes(s))
+      evidence.push(...structuralOnly)
       conflicts.push({
         conflictType: 'PARAMETER_OVERLAP',
         conflictingSpellAddress: other.spellAddress,
         severity: 'BLOCKING',
-        reason: `Parameter overlap detected: both spells modify [${overlappingParams.join(', ')}]`,
-        details: { overlappingParams, otherStatus: other.status },
+        reason:
+          structuralOverlap.length > 0
+            ? `Parameter overlap detected: both spells modify [${overlappingParams.join(', ') || 'same contract surface'}] and touch the same onchain surface [${structuralOverlap.join(', ')}]`
+            : `Parameter overlap detected: both spells modify [${overlappingParams.join(', ')}]`,
+        details: { overlappingParams, structuralOverlap, otherStatus: other.status },
       })
     }
 
@@ -198,7 +257,7 @@ export function detectConflicts(
         candidate.nextExecutionWindow.getTime() - other.nextExecutionWindow.getTime()
       )
       if (timeDiffMs <= TWO_HOURS_MS) {
-        const sharesParameters = overlappingParams.length > 0
+        const sharesParameters = overlappingParams.length > 0 || structuralOverlap.length > 0
         conflicts.push({
           conflictType: 'RACE_CONDITION',
           conflictingSpellAddress: other.spellAddress,
