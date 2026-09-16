@@ -21,4 +21,6 @@ export const CHAINLINK_ETH_USD_ADDRESS = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b
 // Base Registry
 export const BASE_CHAIN_ID = 8453
 export const BASE_SEPOLIA_CHAIN_ID = 84532
-export const AXON_REGISTRY_ADDRESS = '0x572436712eADc4117202D36bdaFe1c54B6231330' as const
+// Base Sepolia deployment (redeployed 2026-09-16 with per-protocol index;
+// previous deployment 0x572436712eADc4117202D36bdaFe1c54B6231330 kept for history)
+export const AXON_REGISTRY_ADDRESS = '0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2' as const

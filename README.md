@@ -106,7 +106,7 @@ Ensure the following variables are set in `.env`:
 DATABASE_URL="postgresql://user:pass@host/db?sslmode=require"
 ETH_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
 BASE_SEPOLIA_RPC="https://sepolia.base.org"
-AXON_REGISTRY_ADDRESS="0x572436712eADc4117202D36bdaFe1c54B6231330"
+AXON_REGISTRY_ADDRESS="0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2"
 ```
 
 Push the database schema to your PostgreSQL instance:
@@ -257,7 +257,7 @@ struct ExecutionRecord {
 
 | Network | Contract | Address | Explorer |
 | :--- | :--- | :--- | :--- |
-| **Base Sepolia** | `AxonRegistry` | `0x572436712eADc4117202D36bdaFe1c54B6231330` | [BaseScan](https://sepolia.basescan.org/address/0x572436712eADc4117202D36bdaFe1c54B6231330) |
+| **Base Sepolia** | `AxonRegistry` | `0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2` | [BaseScan](https://sepolia.basescan.org/address/0x2C56618a6A89f04764e1De25A3F9D1C3Bf1471E2) |
 
 > Reads: `getRecordsByProtocol` is O(matches) via a per-protocol index.
 > For dashboards use `getRecordsByProtocolPaginated(protocol, limit, offset)` (newest-first)
