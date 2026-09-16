@@ -4,6 +4,9 @@
 # Run:   docker run -p 3000:3000 --env-file .env axon-dashboard
 FROM node:20-slim
 
+# OpenSSL for Prisma engines (node:20-slim is minimal and lacks it)
+RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install workspace deps first (better layer caching)
