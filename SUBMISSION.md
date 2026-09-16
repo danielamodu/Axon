@@ -95,5 +95,5 @@ https://github.com/danielamodu/Axon
 
 ## Contact
 
-- Email: _TODO_
-- X/Discord: _TODO_
+- Email: theamebonetwork@gmail.com
+- X: [@szrxbt](https://x.com/szrxbt)
