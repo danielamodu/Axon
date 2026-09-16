@@ -23,5 +23,8 @@
     "db:push": "npm --workspace=packages/watcher run db:push",
     "db:generate": "npm --workspace=packages/watcher run db:generate",
     "db:studio": "npm --workspace=packages/watcher run db:studio"
+  },
+  "dependencies": {
+    "railway": "^3.11.0"
   }
 }
