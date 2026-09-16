@@ -2,7 +2,7 @@
 
 > Bounty: https://dorahacks.io/hackathon/agent-economy/detail
 > Track: Main — Best Integration into a Live Project
-> Demo video: VIDEO_URL (recording done, uploading to YouTube)
+> Demo video: https://youtu.be/eZwKyEdFE7g
 
 ## Which project did you integrate with, and what does the integration do?
 
