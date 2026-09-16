@@ -29,6 +29,7 @@ describe('x402 Gateway Microservice', () => {
     expect(body.instructions).toContain('EIP-3009')
   })
 
+  // Live payment-settlement path — needs headroom beyond the 5s default.
   it('POST /execute/spell with Authorization header executes and returns 200 with settlement receipt', async () => {
     const res = await app.request('/execute/spell', {
       method: 'POST',
@@ -47,7 +48,7 @@ describe('x402 Gateway Microservice', () => {
     expect(body.executionId).toMatch(/^kh-exec-/)
     expect(body.txHash).toBeDefined()
     expect(body.paymentTxHash).toMatch(/^0x402b/)
-  })
+  }, 20000)
 
   it('POST /execute/spell accepts x-payment-signature as valid authorization', async () => {
     const res = await app.request('/execute/spell', {
@@ -63,7 +64,7 @@ describe('x402 Gateway Microservice', () => {
     const body = await res.json()
     expect(body.success).toBe(true)
     expect(body.paymentSettled).toBe(true)
-  })
+  }, 20000)
 
   it('POST /execute/custom-action without payment returns 402 challenge', async () => {
     const res = await app.request('/execute/custom-action', {
@@ -88,7 +89,7 @@ describe('x402 Gateway Microservice', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.mode).toBe('live')
-  })
+  }, 20000)
 
   it('unknown route returns 404 without 402 challenge', async () => {
     const res = await app.request('/unknown-endpoint')

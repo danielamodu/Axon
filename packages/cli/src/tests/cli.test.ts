@@ -15,10 +15,11 @@ describe('@axon/cli', () => {
     expect(commandNames).toContain('keys')
   })
 
+  // Live RPC fetch — needs headroom beyond the 5s default (flaked at ~5.0s).
   it('detectGovernanceType returns a recognized governance type', async () => {
     const type = await detectGovernanceType('0x0a3f6849f78076aefaDf113F5BED87720274dDC0', 'mainnet')
     expect(['makerdao-spell', 'compound-governor', 'openzeppelin-governor', 'optimistic-timelock']).toContain(type)
-  })
+  }, 20000)
 
   it('detectGovernanceType returns openzeppelin-governor for empty contract', async () => {
     const type = await detectGovernanceType('0x0000000000000000000000000000000000000000', 'mainnet')
