@@ -45,11 +45,12 @@ import { Link, useLocation, useParams } from "wouter";
 import { toast } from "sonner";
 import { getStoredKey, useRequireAuth } from "./Auth";
 
-export const DEFAULT_API_KEY = "axon_live_f1dc74257d61b8565fb7fbe8f34573c9";
-
 export function getAuthToken(): string {
-  if (typeof window === "undefined") return DEFAULT_API_KEY;
-  return window.localStorage.getItem("axon_api_key") || DEFAULT_API_KEY;
+  if (typeof window === "undefined") return "";
+  // No shipped default key: unauthenticated users go through /login
+  // (useRequireAuth). A hardcoded client key would be visible in devtools
+  // and is never a credential.
+  return window.localStorage.getItem("axon_api_key") || "";
 }
 
 export function getAuthHeaders(): HeadersInit {

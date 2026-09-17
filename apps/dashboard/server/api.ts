@@ -370,10 +370,13 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 3. GET /api/queue - real database records scoped to the authenticated org
+  // 3. GET /api/queue - real database records scoped to the authenticated org.
+  // Strict auth (no resolveOrg fallback): operational queue data must never
+  // leak across workspaces. Public aggregate routes below stay lenient.
   router.get("/queue", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const records = await db.spellRecord.findMany({
         where: {
@@ -456,9 +459,11 @@ export function createApiRouter(): Router {
 
   // 4. GET /api/history - real database records scoped to the authenticated org.
   // No fabricated fallbacks: missing txHash/gas stay null so the UI shows "—".
+  // Strict auth (no resolveOrg fallback): tx hashes stay inside the workspace.
   router.get("/history", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const records = await db.spellRecord.findMany({
         where: { orgId: org.id, status: "EXECUTED" },

@@ -225,6 +225,16 @@ describe("auth + watcher HTTP endpoints (no-DB paths)", () => {
     expect(body.ok).toBe(true);
   });
 
+  it("GET /queue rejects unauthenticated with 401 (no demo fallback)", async () => {
+    const res = await fetch(`${base}/queue`);
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /history rejects unauthenticated with 401 (no demo fallback)", async () => {
+    const res = await fetch(`${base}/history`);
+    expect(res.status).toBe(401);
+  });
+
   it("POST /auth/logout returns 200", async () => {
     const res = await fetch(`${base}/auth/logout`, { method: "POST" });
     expect(res.status).toBe(200);
