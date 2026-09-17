@@ -74,8 +74,7 @@ Authored and executed by an AI agent over KeeperHub's MCP
   are extrapolated to the execution window from snapshot history (a draining
   Vat now flips YELLOW to RED before the window); gas is scored from live
   trend plus volatility, since base fee has no memory worth forecasting.
-- `AxonRegistry` source verification was submitted via Etherscan V2; badge
-  pending confirmation on BaseScan.
+- `AxonRegistry` source verified on BaseScan (exact match, solc 0.8.20, 200 runs).
 - Live mainnet execution has never fired end-to-end (no real spell has queued
   during the build window) — dry-runs are explicitly marked and never forged.
 
