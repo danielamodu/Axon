@@ -67,9 +67,13 @@ Authored and executed by an AI agent over KeeperHub's MCP
 - The first key was read-scoped (workflow creation `unauthorized`); replaced
   with a write-scoped key — governor templates now publish on boot and direct
   execution writes proofs (see tx above).
-- Conflict fingerprints are keyword heuristics, not decoded-calldata analysis.
-- The projector assesses current state + gas slope; it does not time-travel to
-  the execution window.
+- Conflict fingerprints started as keyword heuristics; now layered with
+  structural fingerprints decoded from calldata (targets, selectors, function
+  names) — same-contract collisions are caught with unrelated descriptions.
+- The projector no longer assumes current state: Vat headroom and USDS supply
+  are extrapolated to the execution window from snapshot history (a draining
+  Vat now flips YELLOW to RED before the window); gas is scored from live
+  trend plus volatility, since base fee has no memory worth forecasting.
 - `AxonRegistry` source verification was submitted via Etherscan V2; badge
   pending confirmation on BaseScan.
 - Live mainnet execution has never fired end-to-end (no real spell has queued
