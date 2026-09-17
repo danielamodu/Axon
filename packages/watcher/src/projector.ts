@@ -18,8 +18,7 @@ export interface GasPriceTrend {
   slopeGweiPerBlock: number
 }
 
-/** Per-protocol risk thresholds. Defaults preserve legacy Sky behavior. */
-export interface ProjectorThresholds {
+/** Per-protocol risk thresholds. Defaults preserve legacy Sky behavior. */export interface ProjectorThresholds {
   maxAvgGasGwei: number
   maxGasStddevGwei: number
   /** Slope above which a rising gas market forces YELLOW (when avg is also elevated). */
@@ -69,6 +68,71 @@ export interface ScoreAssessment {
   reasons: string[]
   state: ProjectedChainState
   simulation: SimulationResult
+}
+
+/** Snapshot history config: 7-day lookback, 1-hour minimum span for a trend. */
+export const SNAPSHOT_LOOKBACK_MS = 7 * 24 * 3600_000
+export const SNAPSHOT_MIN_SPAN_MS = 1 * 3600_000
+export const SNAPSHOT_PRUNE_AFTER_MS = 7 * 24 * 3600_000
+export const SNAPSHOT_MAX_ROWS = 500
+
+export interface TrendPoint {
+  tMs: number
+  v: number
+}
+
+export interface Extrapolation {
+  value: number
+  slopePerHour: number
+  samples: number
+  spanHours: number
+}
+
+export interface WindowProjection {
+  usdsTotalSupply: number | null
+  vatHeadroomUsds: number | null
+  usdsSlopePerHour: number | null
+  vatSlopePerHour: number | null
+  samples: number
+  spanHours: number
+  trendAvailable: boolean
+}
+
+/**
+ * Least-squares linear fit over (time, value) points, evaluated at targetMs.
+ * Returns null when fewer than 2 points span less than SNAPSHOT_MIN_SPAN_MS —
+ * a line through noise is worse than current state.
+ */
+export function extrapolateTrend(points: TrendPoint[], targetMs: number): Extrapolation | null {
+  if (points.length < 2) return null
+  const t0 = points[0].tMs
+  const spanMs = points[points.length - 1].tMs - t0
+  if (spanMs < SNAPSHOT_MIN_SPAN_MS) return null
+
+  // x in hours from first sample for numerical stability
+  const n = points.length
+  let sumX = 0
+  let sumY = 0
+  let sumXY = 0
+  let sumXX = 0
+  for (const p of points) {
+    const x = (p.tMs - t0) / 3600_000
+    sumX += x
+    sumY += p.v
+    sumXY += x * p.v
+    sumXX += x * x
+  }
+  const denom = n * sumXX - sumX * sumX
+  if (denom === 0) return null
+  const slope = (n * sumXY - sumX * sumY) / denom
+  const intercept = (sumY - slope * sumX) / n
+  const xTarget = (targetMs - t0) / 3600_000
+  return {
+    value: intercept + slope * xTarget,
+    slopePerHour: slope,
+    samples: n,
+    spanHours: spanMs / 3600_000,
+  }
 }
 
 export class StateProjector {
@@ -149,12 +213,33 @@ export class StateProjector {
     // 2. Project chain state at execution window
     const state = await this.projectChainState(spell.nextExecutionWindow)
 
+    // 2b. Persist this reading for trend history (best-effort, never blocks).
+    await this.recordSnapshot(state).catch((err) =>
+      logger.warn({ err: (err as Error)?.message }, 'Snapshot write failed — continuing')
+    )
+
     // 3. Simulate execution against projected state
     const simulation = await this.simulateContractCall(spell.spellAddress as Address)
 
-    // 4. Score spell with per-protocol thresholds when available
+    // 4. Score spell with per-protocol thresholds when available.
+    // Slow-moving variables are linearly extrapolated to the window when
+    // enough history exists; otherwise current values stand (trendAvailable).
     const thresholds = resolveThresholds((spell as { protocolId?: string }).protocolId)
-    const assessment = this.scoreSpell(state, simulation, thresholds)
+    const projection = await this.projectToWindow(spell.nextExecutionWindow).catch((err) => {
+      logger.warn({ err: (err as Error)?.message }, 'Window projection failed — scoring current state')
+      return null as WindowProjection | null
+    })
+    const scoredState: ProjectedChainState = {
+      ...state,
+      usdsTotalSupply: projection?.usdsTotalSupply ?? state.usdsTotalSupply,
+      vatHeadroomUsds: projection?.vatHeadroomUsds ?? state.vatHeadroomUsds,
+    }
+    const assessment = this.scoreSpell(scoredState, simulation, thresholds)
+    if (projection?.trendAvailable) {
+      assessment.reasons.push(
+        `Trend-projected to window (${projection.samples} samples over ${projection.spanHours.toFixed(1)}h)`
+      )
+    }
 
     // 5. Update SpellRecord status and score
     let nextStatus: 'READY' | 'HELD' = assessment.score === 'RED' ? 'HELD' : 'READY'
@@ -172,8 +257,11 @@ export class StateProjector {
           projectedAt: state.projectedAt.toISOString(),
           oracleMode: this.oracleMode,
           gasTrend: state.gasTrend,
-          usdsTotalSupply: state.usdsTotalSupply,
-          vatHeadroomUsds: state.vatHeadroomUsds,
+          usdsTotalSupply: scoredState.usdsTotalSupply,
+          vatHeadroomUsds: scoredState.vatHeadroomUsds,
+          currentUsdsTotalSupply: state.usdsTotalSupply,
+          currentVatHeadroomUsds: state.vatHeadroomUsds,
+          windowProjection: projection,
           ethPriceUsd: state.ethPriceUsd,
           simulation,
         }),
@@ -258,6 +346,73 @@ export class StateProjector {
       stddevGwei,
       recentBlocks: baseFeesGwei,
       slopeGweiPerBlock: computeSlope(baseFeesGwei.slice().reverse()),
+    }
+  }
+
+  /**
+   * Persist the current reading for trend history and prune samples older
+   * than SNAPSHOT_PRUNE_AFTER_MS. Metrics must never break the pipeline —
+   * callers wrap in catch, and this method throws only on programmer error.
+   */
+  async recordSnapshot(state: ProjectedChainState): Promise<void> {
+    await (this.prisma as any).projectorSnapshot.create({
+      data: {
+        gasAvgGwei: state.gasTrend.averageGwei,
+        gasStddevGwei: state.gasTrend.stddevGwei,
+        usdsTotalSupply: state.usdsTotalSupply,
+        vatHeadroomUsds: state.vatHeadroomUsds,
+        ethPriceUsd: state.ethPriceUsd,
+      },
+    })
+    await (this.prisma as any).projectorSnapshot.deleteMany({
+      where: { recordedAt: { lt: new Date(Date.now() - SNAPSHOT_PRUNE_AFTER_MS) } },
+    }).catch(() => {})
+  }
+
+  /**
+   * Linearly extrapolate slow-moving variables (USDS supply, Vat headroom)
+   * to the execution window from snapshot history. Gas is deliberately NOT
+   * projected — base fee has no memory worth extrapolating; it is scored
+   * from current trend + volatility instead.
+   */
+  async projectToWindow(targetTime: Date): Promise<WindowProjection> {
+    const since = new Date(Date.now() - SNAPSHOT_LOOKBACK_MS)
+    const rows = await (this.prisma as any).projectorSnapshot.findMany({
+      where: { recordedAt: { gte: since } },
+      orderBy: { recordedAt: 'asc' },
+      take: SNAPSHOT_MAX_ROWS,
+    })
+
+    const empty: WindowProjection = {
+      usdsTotalSupply: null,
+      vatHeadroomUsds: null,
+      usdsSlopePerHour: null,
+      vatSlopePerHour: null,
+      samples: rows.length,
+      spanHours: 0,
+      trendAvailable: false,
+    }
+    if (rows.length < 2) return empty
+
+    const targetMs = targetTime.getTime()
+    const usds = extrapolateTrend(
+      rows.map((r: any) => ({ tMs: new Date(r.recordedAt).getTime(), v: Number(r.usdsTotalSupply) })),
+      targetMs
+    )
+    const vat = extrapolateTrend(
+      rows.map((r: any) => ({ tMs: new Date(r.recordedAt).getTime(), v: Number(r.vatHeadroomUsds) })),
+      targetMs
+    )
+    if (!usds || !vat) return { ...empty, spanHours: usds?.spanHours ?? vat?.spanHours ?? 0 }
+
+    return {
+      usdsTotalSupply: usds.value,
+      vatHeadroomUsds: vat.value,
+      usdsSlopePerHour: usds.slopePerHour,
+      vatSlopePerHour: vat.slopePerHour,
+      samples: usds.samples,
+      spanHours: usds.spanHours,
+      trendAvailable: true,
     }
   }
 

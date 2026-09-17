@@ -112,3 +112,19 @@ enum ConflictStatus {
   CLEAR
   CONFLICT
 }
+
+// Periodic chain-state samples for trend extrapolation. Slow-moving
+// variables (Vat headroom, USDS supply) are projected linearly to the
+// execution window; gas is recorded for history but scored from current
+// trend + volatility (base fee has no memory worth extrapolating).
+model ProjectorSnapshot {
+  id              String   @id @default(cuid())
+  recordedAt      DateTime @default(now())
+  gasAvgGwei      Float
+  gasStddevGwei   Float
+  usdsTotalSupply Float
+  vatHeadroomUsds Float
+  ethPriceUsd     Float
+
+  @@index([recordedAt])
+}

@@ -35,6 +35,11 @@ describe('StateProjector', () => {
         findFirst: vi.fn(),
         update: vi.fn().mockResolvedValue({}),
       },
+      projectorSnapshot: {
+        create: vi.fn().mockResolvedValue({}),
+        deleteMany: vi.fn().mockResolvedValue({}),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
     }
 
     projector = new StateProjector(
@@ -159,6 +164,93 @@ describe('StateProjector', () => {
       expect(assessment.reasons.some((r) => r.includes('Rising gas trend'))).toBe(true)
       // Per-protocol overrides apply without code changes
       expect(resolveThresholds('aave').minVatHeadroomUsds).toBe(50_000_000)
+    })
+  })
+
+  describe('trend extrapolation to the execution window', () => {
+    it('extrapolates a linear series to the target time', async () => {
+      const { extrapolateTrend } = await import('../projector')
+      const t0 = Date.now() - 4 * 3600_000
+      const points = [0, 1, 2, 3, 4].map((h) => ({ tMs: t0 + h * 3600_000, v: 100 + h * 10 }))
+      const out = extrapolateTrend(points, t0 + 6 * 3600_000)
+      expect(out).not.toBeNull()
+      expect(out!.value).toBeCloseTo(160, 0)
+      expect(out!.slopePerHour).toBeCloseTo(10, 5)
+      expect(out!.samples).toBe(5)
+    })
+
+    it('refuses trends with too few points or too short a span', async () => {
+      const { extrapolateTrend } = await import('../projector')
+      expect(extrapolateTrend([], Date.now())).toBeNull()
+      expect(extrapolateTrend([{ tMs: Date.now(), v: 1 }], Date.now())).toBeNull()
+      const t = Date.now()
+      expect(
+        extrapolateTrend(
+          [{ tMs: t, v: 1 }, { tMs: t + 10 * 60_000, v: 2 }],
+          t + 3600_000
+        )
+      ).toBeNull()
+    })
+
+    it('projectToWindow falls back when history is empty', async () => {
+      mockPrisma.projectorSnapshot.findMany.mockResolvedValue([])
+      const proj = await projector.projectToWindow(new Date(Date.now() + 48 * 3600_000))
+      expect(proj.trendAvailable).toBe(false)
+      expect(proj.usdsTotalSupply).toBeNull()
+    })
+
+    it('projectToWindow extrapolates Vat exhaustion before the window', async () => {
+      const t0 = Date.now() - 6 * 3600_000
+      mockPrisma.projectorSnapshot.findMany.mockResolvedValue(
+        [0, 1, 2, 3, 4, 5, 6].map((h) => ({
+          recordedAt: new Date(t0 + h * 3600_000),
+          usdsTotalSupply: 6_000_000_000,
+          vatHeadroomUsds: 300_000_000 - h * 100_000_000, // draining 100M/h
+          gasAvgGwei: 25,
+          gasStddevGwei: 5,
+          ethPriceUsd: 2500,
+        }))
+      )
+      const proj = await projector.projectToWindow(new Date(t0 + 10 * 3600_000))
+      expect(proj.trendAvailable).toBe(true)
+      expect(proj.vatHeadroomUsds!).toBeLessThan(0) // exhausted before window → RED
+      expect(proj.vatSlopePerHour!).toBeCloseTo(-100_000_000, -6)
+    })
+
+    it('processSpell scores RED when the trend exhausts headroom before the window', async () => {
+      const t0 = Date.now() - 6 * 3600_000
+      mockPrisma.projectorSnapshot.findMany.mockResolvedValue(
+        [0, 1, 2, 3, 4, 5, 6].map((h) => ({
+          recordedAt: new Date(t0 + h * 3600_000),
+          usdsTotalSupply: 6_000_000_000,
+          vatHeadroomUsds: 300_000_000 - h * 100_000_000,
+          gasAvgGwei: 25,
+          gasStddevGwei: 5,
+          ethPriceUsd: 2500,
+        }))
+      )
+      const mockSpell: any = {
+        id: 'spell-trend',
+        spellAddress: '0x1234567890123456789012345678901234567890',
+        nextExecutionWindow: new Date(t0 + 10 * 3600_000),
+        protocolId: 'sky',
+      }
+      vi.spyOn(projector, 'projectChainState').mockResolvedValue({
+        ...defaultMockState,
+        vatHeadroomUsds: 50_000_000, // current looks merely low…
+      })
+      vi.spyOn(projector, 'simulateContractCall').mockResolvedValue({ success: true, simulatedVia: 'viem' })
+
+      const assessment = await projector.processSpell(mockSpell)
+
+      // …but the trend says exhausted → RED/HELD instead of YELLOW/READY
+      expect(assessment.score).toBe('RED')
+      expect(mockPrisma.spellRecord.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'HELD', simulationScore: 'RED' }),
+        })
+      )
+      expect(mockPrisma.projectorSnapshot.create).toHaveBeenCalled()
     })
   })
 
