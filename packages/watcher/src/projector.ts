@@ -224,7 +224,26 @@ export class StateProjector {
     // 4. Score spell with per-protocol thresholds when available.
     // Slow-moving variables are linearly extrapolated to the window when
     // enough history exists; otherwise current values stand (trendAvailable).
-    const thresholds = resolveThresholds((spell as { protocolId?: string }).protocolId)
+    // Threshold resolution: built-in profile by protocolId, then explicit
+    // per-protocol overrides from Protocol.config.thresholds. The config path
+    // is what actually lets an operator tune a protocol without a code change —
+    // the slug rarely matches a built-in profile key on its own.
+    const protocolId = (spell as { protocolId?: string }).protocolId
+    let thresholdOverrides: Partial<ProjectorThresholds> | undefined
+    // Guard the delegate: some callers (and tests) inject a partial Prisma
+    // stub without the `protocol` model. A missing delegate must fall back to
+    // built-in thresholds, never throw.
+    const protocolDelegate = (this.prisma as any)?.protocol
+    if (protocolId && typeof protocolDelegate?.findUnique === 'function') {
+      const proto = await protocolDelegate
+        .findUnique({ where: { id: protocolId } })
+        .catch(() => null)
+      const cfg = (proto?.config as { thresholds?: Partial<ProjectorThresholds> } | null) ?? null
+      if (cfg?.thresholds && typeof cfg.thresholds === 'object') {
+        thresholdOverrides = cfg.thresholds
+      }
+    }
+    const thresholds = resolveThresholds(protocolId, thresholdOverrides)
     const projection = await this.projectToWindow(spell.nextExecutionWindow).catch((err) => {
       logger.warn({ err: (err as Error)?.message }, 'Window projection failed — scoring current state')
       return null as WindowProjection | null

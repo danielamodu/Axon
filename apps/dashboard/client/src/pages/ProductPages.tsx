@@ -1147,6 +1147,8 @@ function ProjectionPanel() {
     usdsSupply: "—",
     vatHeadroom: "—",
     ethUsdPrice: "—",
+    status: "—",
+    explanation: "Loading live on-chain conditions…",
   });
 
   useEffect(() => {
@@ -1158,6 +1160,19 @@ function ProjectionPanel() {
       .catch(() => {});
   }, []);
 
+  // Status is driven by the API (same thresholds as the watcher's projector),
+  // never hardcoded — a YELLOW/RED/UNAVAILABLE state must show honestly here.
+  const status: string = projection.status || "—";
+  const tone: "positive" | "warning" | "danger" | "neutral" =
+    status === "GREEN"
+      ? "positive"
+      : status === "YELLOW"
+      ? "warning"
+      : status === "RED"
+      ? "danger"
+      : "neutral";
+  const Icon = status === "GREEN" ? CheckCircle2 : status === "UNAVAILABLE" || status === "—" ? Info : AlertTriangle;
+
   return (
     <div className="panel projection-panel">
       <div className="panel-head">
@@ -1165,7 +1180,7 @@ function ProjectionPanel() {
           <h2>State projection</h2>
           <p>Live on-chain conditions verified against Ethereum mainnet</p>
         </div>
-        <StatusBadge status="GREEN" tone="positive" />
+        <StatusBadge status={status} tone={tone} />
       </div>
       <div className="projection-grid">
         <div>
@@ -1190,8 +1205,8 @@ function ProjectionPanel() {
         </div>
       </div>
       <div className="projection-explanation">
-        <CheckCircle2 size={16} />
-        <span>All required conditions are met. The spell is ready for KeeperHub execution.</span>
+        <Icon size={16} />
+        <span>{projection.explanation}</span>
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import { mainnet } from "viem/chains";
 import {
   buildProtocolId,
   comparePassword,
+  createSessionToken,
   findOrgByToken,
   generateApiKeyValue,
   getBearerToken,
@@ -83,6 +84,14 @@ let cachedChainProjection: {
   vatHeadroom: string;
   ethPrice: string;
   blockNumber: number;
+  // Raw numerics for scoring (null when the read did not resolve).
+  gasGweiNum: number | null;
+  usdsSupplyUsd: number | null;
+  vatHeadroomUsd: number | null;
+  ethPriceNum: number | null;
+  // True only when the core on-chain reads that drive scoring resolved.
+  // When false, the string fields are placeholders, not live data.
+  live: boolean;
   timestamp: number;
 } | null = null;
 
@@ -94,16 +103,21 @@ async function getLiveChainData() {
 
   const client = getViemClient();
   let blockNumber = 25931500;
-  let gasGwei = "8.4 gwei";
-  let usdsSupply = "$6.63B";
-  let vatHeadroom = "$3.74B";
-  let ethPrice = "$2,476.80";
+  let gasGwei = "— gwei";
+  let usdsSupply = "—";
+  let vatHeadroom = "—";
+  let ethPrice = "—";
+  let gasGweiNum: number | null = null;
+  let usdsSupplyUsd: number | null = null;
+  let vatHeadroomUsd: number | null = null;
+  let ethPriceNum: number | null = null;
+  let live = false;
 
   if (client) {
     try {
       const [block, gasPrice, rawSupply, rawLine, rawDebt, roundData] = await Promise.all([
-        client.getBlockNumber().catch(() => BigInt(25931500)),
-        client.getGasPrice().catch(() => BigInt(8400000000)),
+        client.getBlockNumber().catch(() => null),
+        client.getGasPrice().catch(() => null),
         client.readContract({
           address: "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
           abi: [{ name: "totalSupply", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] }],
@@ -126,26 +140,34 @@ async function getLiveChainData() {
         }).catch(() => null),
       ]);
 
-      blockNumber = Number(block);
-      gasGwei = `${Number(formatUnits(gasPrice, 9)).toFixed(1)} gwei`;
+      if (block !== null) blockNumber = Number(block);
+
+      if (gasPrice !== null) {
+        gasGweiNum = Number(formatUnits(gasPrice, 9));
+        gasGwei = `${gasGweiNum.toFixed(1)} gwei`;
+      }
 
       if (rawSupply) {
-        const supplyNum = Number(formatEther(rawSupply as bigint)) / 1e9;
-        usdsSupply = `$${supplyNum.toFixed(2)}B`;
+        usdsSupplyUsd = Number(formatEther(rawSupply as bigint));
+        usdsSupply = `$${(usdsSupplyUsd / 1e9).toFixed(2)}B`;
       }
 
       if (rawLine && rawDebt) {
         const diff = (rawLine as bigint) - (rawDebt as bigint);
-        const headroomNum = Number(formatUnits(diff, 45)) / 1e9;
-        vatHeadroom = `$${headroomNum.toFixed(2)}B`;
+        vatHeadroomUsd = Number(formatUnits(diff, 45));
+        vatHeadroom = `$${(vatHeadroomUsd / 1e9).toFixed(2)}B`;
       }
 
       if (roundData && Array.isArray(roundData) && roundData[1]) {
-        const priceNum = Number(roundData[1]) / 1e8;
-        ethPrice = `$${priceNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        ethPriceNum = Number(roundData[1]) / 1e8;
+        ethPrice = `$${ethPriceNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
       }
+
+      // "live" means the core reads that drive the projection score resolved.
+      // A partial read (e.g. price down) is not scored GREEN off stale defaults.
+      live = rawLine !== null && rawDebt !== null && roundData !== null;
     } catch {
-      // quiet fallback to defaults
+      live = false;
     }
   }
 
@@ -155,41 +177,15 @@ async function getLiveChainData() {
     vatHeadroom,
     ethPrice,
     blockNumber,
+    gasGweiNum,
+    usdsSupplyUsd,
+    vatHeadroomUsd,
+    ethPriceNum,
+    live,
     timestamp: now,
   };
 
   return cachedChainProjection;
-}
-
-async function resolveOrg(req: Request) {
-  const authHeader = req.headers.authorization;
-  const token = authHeader ? authHeader.replace(/^Bearer\s+/i, "").trim() : null;
-  const db = getPrisma();
-
-  if (token) {
-    try {
-      const org = await findOrgByToken(db, token);
-      if (org) return org;
-    } catch {
-      // ignore
-    }
-  }
-
-  // Fallback to first org in database or default
-  try {
-    const firstOrg = await db.organisation.findFirst();
-    if (firstOrg) return firstOrg;
-  } catch {
-    // ignore
-  }
-
-  return {
-    id: "org_default_sky",
-    name: "Sky Ecosystem",
-    apiKey: "axon_live_f1dc74257d61b8565fb7fbe8f34573c9",
-    email: "ops@sky.money",
-    createdAt: new Date(),
-  };
 }
 
 export function createApiRouter(): Router {
@@ -200,10 +196,11 @@ export function createApiRouter(): Router {
     res.json({ ok: true, service: "axon-dashboard", time: new Date().toISOString() });
   });
 
-  // 1. GET /api/auth/verify
+  // 1. GET /api/auth/verify — strict: reflects the presented key only.
   router.get("/auth/verify", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       res.json({
         ok: true,
         org: {
@@ -220,7 +217,8 @@ export function createApiRouter(): Router {
 
   router.post("/auth/verify", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       res.json({
         ok: true,
         org: {
@@ -239,7 +237,8 @@ export function createApiRouter(): Router {
   // No hardcoded cards: an org with no protocols gets an empty list (empty state).
   router.get("/protocols", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
 
       let dbProtocols: any[] = [];
@@ -301,7 +300,8 @@ export function createApiRouter(): Router {
   // State Projector value (USDS total supply read live from chain).
   router.get("/protocols/:id", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const { id } = req.params;
 
@@ -522,13 +522,17 @@ export function createApiRouter(): Router {
     }
   });
 
-  // 4b. GET /api/execution/:id - execution detail with KeeperHub and x402 data
+  // 4b. GET /api/execution/:id - execution detail with KeeperHub and x402 data.
+  // Strict auth + org scoping: tx hashes and audit logs stay inside the workspace.
   router.get("/execution/:id", async (req: Request, res: Response) => {
     try {
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const id = req.params.id;
       const r = await db.spellRecord.findFirst({
         where: {
+          orgId: org.id,
           OR: [
             { id },
             { txHash: id },
@@ -589,7 +593,8 @@ export function createApiRouter(): Router {
   // Optional ?protocolId= narrows to one protocol. Chronological, oldest first.
   router.get("/delays", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const protocolId = typeof req.query.protocolId === "string" ? req.query.protocolId : undefined;
 
@@ -626,7 +631,8 @@ export function createApiRouter(): Router {
   // No fabricated numbers: an org with no executions gets zeros and "—".
   router.get("/stats", async (req: Request, res: Response) => {
     try {
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const monthStart = new Date();
       monthStart.setDate(1);
@@ -774,63 +780,57 @@ export function createApiRouter(): Router {
   });
 
   // 7. GET /api/projection - live on-chain state projection
+  // 7. GET /api/projection - live on-chain state projection.
+  // Status is DERIVED from the live reads (same thresholds as the watcher's
+  // StateProjector), never hardcoded. When the core reads don't resolve, the
+  // panel reports UNAVAILABLE rather than a false GREEN off stale placeholders.
   router.get("/projection", async (_req: Request, res: Response) => {
     try {
       const live = await getLiveChainData();
+
+      // Thresholds mirror packages/watcher/src/projector.ts DEFAULT_PROJECTOR_THRESHOLDS.
+      const MAX_AVG_GAS_GWEI = 100;
+      const MIN_VAT_HEADROOM_USDS = 100_000_000;
+
+      let status: "GREEN" | "YELLOW" | "RED" | "UNAVAILABLE" = "GREEN";
+      const reasons: string[] = [];
+
+      if (!live.live) {
+        status = "UNAVAILABLE";
+        reasons.push("Live chain reads did not resolve — RPC unreachable or degraded. Values shown are not live.");
+      } else {
+        if (live.vatHeadroomUsd !== null && live.vatHeadroomUsd <= 0) {
+          status = "RED";
+          reasons.push("Vat debt ceiling is exhausted (headroom ≤ 0).");
+        }
+        if (live.ethPriceNum !== null && live.ethPriceNum <= 0) {
+          status = "RED";
+          reasons.push("Chainlink ETH/USD oracle returned an invalid price.");
+        }
+        if (status !== "RED") {
+          if (live.gasGweiNum !== null && live.gasGweiNum > MAX_AVG_GAS_GWEI) {
+            status = "YELLOW";
+            reasons.push(`Elevated gas price: ${live.gasGweiNum.toFixed(1)} gwei.`);
+          }
+          if (live.vatHeadroomUsd !== null && live.vatHeadroomUsd < MIN_VAT_HEADROOM_USDS) {
+            status = "YELLOW";
+            reasons.push(`Low Vat debt headroom: ${(live.vatHeadroomUsd / 1e6).toFixed(1)}M USDS.`);
+          }
+        }
+        if (reasons.length === 0) {
+          reasons.push("Gas within normal range, ample debt headroom, fresh oracle feed.");
+        }
+      }
+
       res.json({
         ethGas: live.gasGwei,
         usdsSupply: live.usdsSupply,
         vatHeadroom: live.vatHeadroom,
         ethUsdPrice: live.ethPrice,
         blockNumber: live.blockNumber,
-        status: "GREEN",
-        explanation: "All required on-chain conditions are met. State projector ready.",
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // 8. GET /api/execution/:id - detail for a specific spell/tx
-  router.get("/execution/:id", async (req: Request, res: Response) => {
-    try {
-      const { id } = req.params;
-      const db = getPrisma();
-      const spell = await db.spellRecord.findFirst({
-        where: {
-          OR: [{ txHash: id }, { spellAddress: id }, { id }],
-        },
-      });
-
-      if (!spell) {
-        return res.status(404).json({ error: `Execution record ${id} not found` });
-      }
-
-      const live = await getLiveChainData();
-
-      let desc = "Protocol governance execution";
-      if (spell.actions && Array.isArray(spell.actions) && spell.actions.length > 0) {
-        const first = (spell.actions as any[])[0];
-        desc = first.description || first.target || desc;
-      }
-
-      res.json({
-        id: spell.id,
-        spellAddress: spell.spellAddress,
-        description: desc,
-        status: spell.status,
-        simulationScore: spell.simulationScore || "GREEN",
-        conflictStatus: spell.conflictStatus || "CLEAR",
-        conflictDetail: spell.conflictDetail,
-        executedAt: spell.executedAt || spell.calledAt,
-        calledAt: spell.calledAt,
-        txHash: spell.txHash || null,
-        gasUsed: spell.gasUsed ? spell.gasUsed.toString() : null,
-        gasUsedFormatted: spell.gasUsed ? `${(Number(spell.gasUsed) / 1000000).toFixed(2)}m` : null,
-        gasPrice: live.gasGwei,
-        ethUsd: live.ethPrice,
-        usdsSupply: live.usdsSupply,
-        vatHeadroom: live.vatHeadroom,
+        live: live.live,
+        status,
+        explanation: reasons.join(" "),
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -857,7 +857,8 @@ export function createApiRouter(): Router {
         });
       }
 
-      const org = await resolveOrg(req);
+      const org = await requireOrg(req, res);
+      if (!org) return;
       const db = getPrisma();
       const protoId = name.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 32);
 
@@ -1026,14 +1027,12 @@ export function createApiRouter(): Router {
         if (!ok) {
           return res.status(401).json({ error: "Unauthorized. Invalid email or password." });
         }
-        // Rotate on password login: the stored value is a hash (v2) and can
-        // never be recovered, so issue a fresh working key each login.
-        const freshKey = generateApiKeyValue();
-        await db.organisation.update({
-          where: { id: org.id },
-          data: { apiKey: hashApiKey(freshKey), apiKeyVersion: 2 },
-        });
-        return res.json({ apiKey: freshKey, orgId: org.id, orgName: org.name });
+        // Issue a session token instead of rotating the API key. The stored
+        // API key is hashed (v2) and can't be handed back, but rotating it
+        // would silently break the CLI/MCP key for this org. A session token
+        // is a separate, expiring web credential that requireOrg accepts.
+        const sessionToken = createSessionToken(org.id);
+        return res.json({ apiKey: sessionToken, orgId: org.id, orgName: org.name });
       }
 
       return res.status(400).json({ error: "Provide email+password or apiKey" });

@@ -6,6 +6,7 @@ import { createApiRouter } from "./api";
 import {
   buildProtocolId,
   comparePassword,
+  createSessionToken,
   findOrgByToken,
   generateApiKeyValue,
   getBearerToken,
@@ -13,8 +14,10 @@ import {
   hashPassword,
   isValidAddress,
   maskApiKey,
+  resolveOrgFromToken,
   validateEmail,
   validatePassword,
+  verifySessionToken,
 } from "./auth";
 
 describe("auth helpers", () => {
@@ -103,6 +106,55 @@ describe("auth helpers", () => {
     expect(h1).toMatch(/^axon_live_[0-9a-f]{32}$/);
     expect(h1).not.toContain("abc123");
     expect(hashApiKey("axon_live_other")).not.toBe(h1);
+  });
+
+  it("session token round-trips and carries the orgId", () => {
+    const token = createSessionToken("org_abc");
+    expect(token.startsWith("axon_sess_")).toBe(true);
+    expect(verifySessionToken(token)).toEqual({ orgId: "org_abc" });
+  });
+
+  it("rejects a tampered session token", () => {
+    const token = createSessionToken("org_abc");
+    // Flip the last character of the signature
+    const tampered = token.slice(0, -1) + (token.slice(-1) === "a" ? "b" : "a");
+    expect(verifySessionToken(tampered)).toBeNull();
+  });
+
+  it("rejects an expired session token", () => {
+    const expired = createSessionToken("org_abc", -1000);
+    expect(verifySessionToken(expired)).toBeNull();
+  });
+
+  it("verifySessionToken returns null for non-session values", () => {
+    expect(verifySessionToken("axon_live_abc123")).toBeNull();
+    expect(verifySessionToken("")).toBeNull();
+    expect(verifySessionToken("axon_sess_garbage")).toBeNull();
+  });
+
+  it("resolveOrgFromToken accepts a session token or falls back to API key", async () => {
+    const sessionToken = createSessionToken("org_sess");
+    const db = {
+      organisation: {
+        findUnique: async ({ where }: any) => {
+          if (where.id === "org_sess") return { id: "org_sess", name: "SessionOrg" };
+          if (where.apiKey === hashApiKey("axon_live_realkey000000000000000000")) {
+            return { id: "org_key", name: "KeyOrg" };
+          }
+          return null;
+        },
+      },
+    };
+    // Session path
+    expect(await resolveOrgFromToken(db, sessionToken)).toEqual(
+      expect.objectContaining({ id: "org_sess" })
+    );
+    // API-key path (non-session value falls through to hash lookup)
+    expect(await resolveOrgFromToken(db, "axon_live_realkey000000000000000000")).toEqual(
+      expect.objectContaining({ id: "org_key" })
+    );
+    // Unknown
+    expect(await resolveOrgFromToken(db, "axon_live_nope0000000000000000000000")).toBeNull();
   });
 
   it("findOrgByToken matches by hash only", async () => {
